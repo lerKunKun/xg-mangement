@@ -91,6 +91,7 @@ func main() {
 		SessionTTL:     12 * time.Hour,
 		PolicyReloader: authorizer,
 	}
+	webhooks := &httpapi.ShopifyWebhookDependencies{Repository: database, Cipher: cipher}
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Authenticator: auth.CompositeAuthenticator{
 			auth.SessionAuthenticator{Sessions: sessions, Principals: database},
@@ -105,10 +106,14 @@ func main() {
 		Admin:           database,
 		Sessions:        sessions,
 		IntegrationFlow: integrationFlow,
+		Webhooks:        webhooks,
 		DevLoginEnabled: cfg.Auth.DevLoginEnabled,
 		SecureCookies:   secureCookies,
 		SessionTTL:      12 * time.Hour,
 	})
+	outboxContext, stopOutbox := context.WithCancel(context.Background())
+	defer stopOutbox()
+	go publishOutbox(outboxContext, logger, database, jobQueue)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddress,
 		Handler:           router,
@@ -139,5 +144,26 @@ func main() {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownContext); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+	}
+}
+
+type outboxStore interface {
+	PublishOutboxBatch(context.Context, postgres.OutboxJobPublisher, int) (int, error)
+}
+
+func publishOutbox(ctx context.Context, logger *slog.Logger, store outboxStore, publisher postgres.OutboxJobPublisher) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if count, err := store.PublishOutboxBatch(ctx, publisher, 50); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("outbox publish batch failed", "error", err)
+		} else if count > 0 {
+			logger.Info("outbox messages published", "count", count)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }

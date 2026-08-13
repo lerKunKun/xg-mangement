@@ -73,6 +73,7 @@ type Dependencies struct {
 	DevLoginEnabled bool
 	SecureCookies   bool
 	SessionTTL      time.Duration
+	Webhooks        *ShopifyWebhookDependencies
 }
 
 func NewRouter(dependencies Dependencies) http.Handler {
@@ -95,7 +96,11 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		router.GET("/api/v1/integrations/dingtalk/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
 		router.GET("/api/v1/integrations/shopify/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
 	}
-	router.POST("/api/v1/webhooks/shopify", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	if dependencies.Webhooks != nil {
+		router.POST("/api/v1/webhooks/shopify", shopifyWebhook(*dependencies.Webhooks))
+	} else {
+		router.POST("/api/v1/webhooks/shopify", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	}
 
 	api := router.Group("/api/v1")
 	api.Use(authenticate(dependencies.Authenticator))
