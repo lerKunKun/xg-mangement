@@ -79,6 +79,19 @@ type StoreConnection struct {
 	RefreshExpiresAt     *time.Time
 	PublicConfig         json.RawMessage
 	EncryptedSecrets     []byte
+	LastErrorCode        string
+}
+
+// CredentialUpdate is applied while the store credential row is still locked.
+// Empty credential bytes preserve the existing ciphertext; an empty error code
+// clears a previous provider error when Status is connected.
+type CredentialUpdate struct {
+	Changed              bool
+	EncryptedCredentials []byte
+	ExpiresAt            *time.Time
+	RefreshExpiresAt     *time.Time
+	Status               string
+	LastErrorCode        string
 }
 
 type Product struct {
