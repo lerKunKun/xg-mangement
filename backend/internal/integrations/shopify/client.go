@@ -28,9 +28,33 @@ type Shop struct {
 	PrimaryDomain string
 }
 
-type Client struct{ httpClient *http.Client }
+type EndpointResolver func(domain, apiVersion string) string
 
-func NewClient() *Client { return &Client{httpClient: &http.Client{Timeout: 20 * time.Second}} }
+type Client struct {
+	httpClient       *http.Client
+	endpointResolver EndpointResolver
+}
+
+func NewClient() *Client {
+	return &Client{httpClient: &http.Client{Timeout: 20 * time.Second}}
+}
+
+func NewClientWithEndpoint(httpClient *http.Client, resolver EndpointResolver) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
+	return &Client{httpClient: httpClient, endpointResolver: resolver}
+}
+
+func (c *Client) endpoint(domain, apiVersion string) string {
+	if c.endpointResolver != nil {
+		return c.endpointResolver(domain, apiVersion)
+	}
+	if apiVersion == "" {
+		return "https://" + domain + "/admin/oauth/access_token"
+	}
+	return "https://" + domain + "/admin/api/" + apiVersion + "/graphql.json"
+}
 
 func (c *Client) Exchange(ctx context.Context, shop string, cfg OAuthConfig, code string) (Token, error) {
 	domain, err := NormalizeShopDomain(shop)
