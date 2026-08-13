@@ -1,11 +1,17 @@
 package config
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/xg-management/platform/backend/internal/security"
 )
+
+const developmentCredentialEncryptionKey = "0123456789abcdef0123456789abcdef"
 
 type Config struct {
 	Environment             string
@@ -64,7 +70,12 @@ type GoogleAdsConfig struct {
 }
 
 func Load(lookup func(string) string) (Config, error) {
-	environment := valueOrDefault(lookup("APP_ENV"), "development")
+	environment := strings.TrimSpace(valueOrDefault(lookup("APP_ENV"), "development"))
+	switch environment {
+	case "development", "test", "production":
+	default:
+		return Config{}, fmt.Errorf("APP_ENV must be one of development, test, or production")
+	}
 	devLoginEnabled, err := strconv.ParseBool(valueOrDefault(lookup("AUTH_DEV_LOGIN_ENABLED"), "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse AUTH_DEV_LOGIN_ENABLED: %w", err)
@@ -103,7 +114,7 @@ func Load(lookup func(string) string) (Config, error) {
 			SessionSecret:   lookup("SESSION_SECRET"),
 		},
 		WebBaseURL:              valueOrDefault(lookup("WEB_BASE_URL"), "http://localhost:3001"),
-		CredentialEncryptionKey: valueOrDefault(lookup("CREDENTIAL_ENCRYPTION_KEY"), "0123456789abcdef0123456789abcdef"),
+		CredentialEncryptionKey: valueOrDefault(lookup("CREDENTIAL_ENCRYPTION_KEY"), developmentCredentialEncryptionKey),
 		ObjectStorage: ObjectStorageConfig{
 			Endpoint:        valueOrDefault(lookup("OBJECT_STORAGE_ENDPOINT"), "http://localhost:9000"),
 			Region:          valueOrDefault(lookup("OBJECT_STORAGE_REGION"), "auto"),
@@ -124,7 +135,7 @@ func Load(lookup func(string) string) (Config, error) {
 				RedirectURI:  lookup("SHOPIFY_REDIRECT_URI"),
 			},
 			APIVersion: valueOrDefault(lookup("SHOPIFY_API_VERSION"), "2026-07"),
-			Scopes:     valueOrDefault(lookup("SHOPIFY_SCOPES"), "read_products,write_products,read_orders,read_themes"),
+			Scopes:     valueOrDefault(lookup("SHOPIFY_SCOPES"), "read_products,read_themes"),
 		},
 		ShopifySync: ShopifySyncConfig{PollInterval: pollInterval, Timeout: syncTimeout, MaxAttempts: maxAttempts},
 		MetaAds: OAuthProviderConfig{
@@ -149,12 +160,29 @@ func Load(lookup func(string) string) (Config, error) {
 		if len(cfg.Auth.SessionSecret) < 32 {
 			return Config{}, fmt.Errorf("SESSION_SECRET must contain at least 32 characters in production")
 		}
-		if len(cfg.CredentialEncryptionKey) < 32 {
-			return Config{}, fmt.Errorf("CREDENTIAL_ENCRYPTION_KEY must contain an AES-256 key in production")
+		configuredKey := strings.TrimSpace(lookup("CREDENTIAL_ENCRYPTION_KEY"))
+		if configuredKey == "" || credentialKeyMatches(configuredKey, developmentCredentialEncryptionKey) {
+			return Config{}, fmt.Errorf("CREDENTIAL_ENCRYPTION_KEY must be explicitly configured with a non-development AES-256 key in production")
 		}
+	}
+	if strings.TrimSpace(cfg.Shopify.APIVersion) != "2026-07" {
+		return Config{}, fmt.Errorf("SHOPIFY_API_VERSION is fixed at 2026-07 for this release")
+	}
+	if _, err := security.NewCredentialCipher(cfg.CredentialEncryptionKey); err != nil {
+		return Config{}, fmt.Errorf("validate CREDENTIAL_ENCRYPTION_KEY: %w", err)
 	}
 
 	return cfg, nil
+}
+
+func credentialKeyMatches(candidate, known string) bool {
+	decode := func(value string) []byte {
+		if decoded, err := base64.StdEncoding.DecodeString(value); err == nil && len(decoded) == 32 {
+			return decoded
+		}
+		return []byte(value)
+	}
+	return bytes.Equal(decode(candidate), decode(known))
 }
 
 func positiveDuration(lookup func(string) string, key, fallback string) (time.Duration, error) {

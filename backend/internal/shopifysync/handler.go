@@ -17,9 +17,10 @@ type SyncProcessor interface {
 type Handler struct{ Syncer SyncProcessor }
 
 type HandlerError struct {
-	Code      string
-	Retryable bool
-	Cause     error
+	Code            string
+	Retryable       bool
+	PreserveAttempt bool
+	Cause           error
 }
 
 func (e *HandlerError) Error() string {
@@ -29,7 +30,8 @@ func (e *HandlerError) Error() string {
 	return fmt.Sprintf("%s: %v", e.Code, e.Cause)
 }
 
-func (e *HandlerError) Unwrap() error { return e.Cause }
+func (e *HandlerError) Unwrap() error              { return e.Cause }
+func (e *HandlerError) PreserveQueueAttempt() bool { return e.PreserveAttempt }
 
 func (h Handler) Handle(ctx context.Context, envelope jobs.Envelope) error {
 	if envelope.Type != jobs.TypeShopifyStoreSyncRequested {
@@ -63,7 +65,7 @@ func classifyHandlerError(err error) error {
 	}
 	var syncErr *Error
 	if errors.As(err, &syncErr) {
-		return &HandlerError{Code: syncErr.Code, Retryable: syncErr.Retryable, Cause: err}
+		return &HandlerError{Code: syncErr.Code, Retryable: syncErr.Retryable, PreserveAttempt: syncErr.Code == "sync_already_running", Cause: err}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &HandlerError{Code: "sync_timeout", Retryable: true, Cause: err}

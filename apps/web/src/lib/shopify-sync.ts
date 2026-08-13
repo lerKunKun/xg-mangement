@@ -24,7 +24,7 @@ export interface SyncRun {
 export interface ShopifyTheme {
   shopify_gid: string;
   name: string;
-  role: "MAIN" | "UNPUBLISHED" | "DEVELOPMENT" | "DEMO" | "MOBILE";
+  role: "ARCHIVED" | "DEMO" | "DEVELOPMENT" | "LOCKED" | "MAIN" | "UNPUBLISHED" | "MOBILE";
   processing: boolean;
   processing_failed: boolean;
   theme_store_id?: number;

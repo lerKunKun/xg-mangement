@@ -35,6 +35,7 @@ type SyncRequest struct {
 	StoreID        string   `json:"store_id"`
 	RunID          string   `json:"run_id"`
 	Mode           SyncMode `json:"mode,omitempty"`
+	LeaseOwner     string   `json:"-"`
 }
 
 func (r SyncRequest) Validate() error {
@@ -87,6 +88,7 @@ type StoreConnection struct {
 	PublicConfig         json.RawMessage
 	EncryptedSecrets     []byte
 	LastErrorCode        string
+	GrantedScopes        []string
 }
 
 // CredentialUpdate is applied while the store credential row is still locked.

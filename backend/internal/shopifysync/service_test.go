@@ -27,7 +27,7 @@ func TestServiceSyncReplacesMirrorOnlyAfterAllSourcesComplete(t *testing.T) {
 	if err := service.Sync(context.Background(), request); err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	want := []string{"start-run", "access-token", "start-products", "poll-products", "download-products", "start-collections", "poll-collections", "download-collections", "list-themes", "replace-mirror", "complete-run"}
+	want := []string{"start-run", "access-token", "start-products", "poll-products", "download-products", "start-collections", "poll-collections", "download-collections", "list-themes", "heartbeat", "replace-mirror"}
 	if strings.Join(sequence, ",") != strings.Join(want, ",") {
 		t.Fatalf("sequence = %v, want %v", sequence, want)
 	}
@@ -76,6 +76,25 @@ func TestServiceSyncClassifiesConcurrentRunAsRetryable(t *testing.T) {
 	}
 }
 
+func TestServiceSyncConvertsPanicAndFailsOwnedRun(t *testing.T) {
+	sequence := []string{}
+	repository := &syncRepositoryStub{sequence: &sequence}
+	service := Service{
+		Repository: repository,
+		Tokens:     accessTokenPanicStub{},
+		Stores:     storeResolverStub{},
+		Shopify:    &bulkClientStub{sequence: &sequence},
+	}
+	err := service.Sync(context.Background(), SyncRequest{OrganizationID: "org-1", StoreID: "store-1", RunID: "run-1", Mode: SyncModeFull})
+	var syncErr *Error
+	if !errors.As(err, &syncErr) || syncErr.Code != "sync_panic" || !syncErr.Retryable {
+		t.Fatalf("Sync() error = %#v", err)
+	}
+	if repository.failCalls != 1 {
+		t.Fatalf("fail calls = %d, want 1", repository.failCalls)
+	}
+}
+
 type syncRepositoryStub struct {
 	sequence     *[]string
 	replaced     MirrorBatch
@@ -84,18 +103,18 @@ type syncRepositoryStub struct {
 	startErr     error
 }
 
-func (r *syncRepositoryStub) StartSyncRun(context.Context, SyncRequest) error {
+func (r *syncRepositoryStub) StartSyncRun(context.Context, SyncRequest) (string, error) {
 	*r.sequence = append(*r.sequence, "start-run")
-	return r.startErr
+	return "lease-1", r.startErr
+}
+func (r *syncRepositoryStub) HeartbeatSyncRun(context.Context, SyncRequest) error {
+	*r.sequence = append(*r.sequence, "heartbeat")
+	return nil
 }
 func (r *syncRepositoryStub) ReplaceMirror(_ context.Context, _ SyncRequest, batch MirrorBatch) error {
 	*r.sequence = append(*r.sequence, "replace-mirror")
 	r.replaced = batch
 	r.replaceCalls++
-	return nil
-}
-func (r *syncRepositoryStub) CompleteSyncRun(context.Context, SyncRequest, ResourceCounts) error {
-	*r.sequence = append(*r.sequence, "complete-run")
 	return nil
 }
 func (r *syncRepositoryStub) FailSyncRun(context.Context, SyncRequest, string, string) error {
@@ -108,6 +127,12 @@ type accessTokenStub struct{ sequence *[]string }
 func (s accessTokenStub) AccessToken(context.Context, string, string) (string, error) {
 	*s.sequence = append(*s.sequence, "access-token")
 	return "access-token", nil
+}
+
+type accessTokenPanicStub struct{}
+
+func (accessTokenPanicStub) AccessToken(context.Context, string, string) (string, error) {
+	panic("test panic")
 }
 
 type storeResolverStub struct{}

@@ -101,36 +101,57 @@ func validPayload(payload json.RawMessage) json.RawMessage {
 	return payload
 }
 
-func (c *Client) StartSyncRun(ctx context.Context, request shopifysync.SyncRequest) error {
+func (c *Client) StartSyncRun(ctx context.Context, request shopifysync.SyncRequest) (string, error) {
 	if err := request.Validate(); err != nil {
-		return err
+		return "", err
 	}
-	command, err := c.pool.Exec(ctx, `
+	var leaseOwner string
+	err := c.pool.QueryRow(ctx, `
 		UPDATE shopify_sync_runs SET status='running', started_at=COALESCE(started_at, now()),
-		    completed_at=NULL, error_code=NULL, error_message=NULL
-		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status IN ('queued','failed')`,
-		request.OrganizationID, request.StoreID, request.RunID)
+		    completed_at=NULL, error_code=NULL, error_message=NULL,
+		    lease_owner=gen_random_uuid()::text, heartbeat_at=now(), lease_expires_at=now()+interval '2 minutes'
+		WHERE organization_id=$1 AND store_id=$2 AND id=$3
+		  AND (status IN ('queued','failed') OR (status='running' AND (lease_expires_at IS NULL OR lease_expires_at < now())))
+		RETURNING lease_owner`, request.OrganizationID, request.StoreID, request.RunID).Scan(&leaseOwner)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return shopifysync.ErrSyncAlreadyRunning
+			return "", shopifysync.ErrSyncAlreadyRunning
 		}
-		return fmt.Errorf("start Shopify sync run: %w", err)
-	}
-	if command.RowsAffected() == 0 {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("start Shopify sync run: %w", err)
+		}
 		var status shopifysync.SyncStatus
 		err := c.pool.QueryRow(ctx, `SELECT status FROM shopify_sync_runs WHERE organization_id=$1 AND store_id=$2 AND id=$3`, request.OrganizationID, request.StoreID, request.RunID).Scan(&status)
 		if err != nil {
-			return fmt.Errorf("find Shopify sync run state: %w", err)
+			return "", fmt.Errorf("find Shopify sync run state: %w", err)
 		}
 		switch status {
 		case shopifysync.SyncStatusCompleted:
-			return shopifysync.ErrSyncAlreadyCompleted
+			return "", shopifysync.ErrSyncAlreadyCompleted
 		case shopifysync.SyncStatusRunning:
-			return shopifysync.ErrSyncAlreadyRunning
+			return "", shopifysync.ErrSyncAlreadyRunning
 		default:
-			return fmt.Errorf("Shopify sync run cannot start from status %q", status)
+			return "", fmt.Errorf("Shopify sync run cannot start from status %q", status)
 		}
+	}
+	return leaseOwner, nil
+}
+
+func (c *Client) HeartbeatSyncRun(ctx context.Context, request shopifysync.SyncRequest) error {
+	command, err := c.pool.Exec(ctx, `
+		UPDATE shopify_sync_runs SET heartbeat_at=now(),lease_expires_at=now()+interval '2 minutes'
+		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status='running' AND lease_owner=$4`,
+		request.OrganizationID, request.StoreID, request.RunID, request.LeaseOwner)
+	if err != nil {
+		return fmt.Errorf("heartbeat Shopify sync run: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		var status shopifysync.SyncStatus
+		if err := c.pool.QueryRow(ctx, `SELECT status FROM shopify_sync_runs WHERE organization_id=$1 AND store_id=$2 AND id=$3`, request.OrganizationID, request.StoreID, request.RunID).Scan(&status); err == nil && status == shopifysync.SyncStatusCompleted {
+			return nil
+		}
+		return fmt.Errorf("Shopify sync lease is no longer owned by this worker")
 	}
 	return nil
 }
@@ -258,11 +279,73 @@ func (c *Client) ReplaceMirror(ctx context.Context, request shopifysync.SyncRequ
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `UPDATE shopify_stores SET last_synced_at=$3, updated_at=now() WHERE organization_id=$1 AND id=$2`, request.OrganizationID, request.StoreID, batch.SyncedAt); err != nil {
+	var resyncRequested bool
+	if err = tx.QueryRow(ctx, `UPDATE shopify_stores SET last_synced_at=$3, updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING resync_requested`, request.OrganizationID, request.StoreID, batch.SyncedAt).Scan(&resyncRequested); err != nil {
 		return fmt.Errorf("mark Shopify store synchronized: %w", err)
+	}
+	counts := batch.Counts()
+	command, err := tx.Exec(ctx, `
+		UPDATE shopify_sync_runs SET status='completed',products_count=$5,variants_count=$6,
+		collections_count=$7,themes_count=$8,error_code=NULL,error_message=NULL,completed_at=now(),
+		lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL
+		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status='running' AND lease_owner=$4`,
+		request.OrganizationID, request.StoreID, request.RunID, request.LeaseOwner,
+		counts.Products, counts.Variants, counts.Collections, counts.Themes)
+	if err != nil {
+		return fmt.Errorf("complete Shopify sync run: %w", err)
+	}
+	if command.RowsAffected() == 0 {
+		return fmt.Errorf("Shopify sync lease was lost before mirror commit")
+	}
+	if resyncRequested {
+		if _, err := tx.Exec(ctx, `UPDATE shopify_stores SET resync_requested=false WHERE organization_id=$1 AND id=$2`, request.OrganizationID, request.StoreID); err != nil {
+			return fmt.Errorf("clear Shopify follow-up sync request: %w", err)
+		}
+		if err := enqueueSyncRunTx(ctx, tx, request.OrganizationID, request.StoreID, "", shopifysync.SyncModeFull, "shopify-resync:"); err != nil {
+			return fmt.Errorf("enqueue Shopify follow-up sync: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit Shopify mirror transaction: %w", err)
+	}
+	return nil
+}
+
+func enqueueSyncRunTx(ctx context.Context, tx pgx.Tx, organizationID, storeID, jobID string, mode shopifysync.SyncMode, eventKeyPrefix string) error {
+	var runID, resolvedJobID string
+	var createdAt time.Time
+	var connected bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shopify_stores WHERE organization_id=$1 AND id=$2 AND status='connected')`, organizationID, storeID).Scan(&connected); err != nil {
+		return fmt.Errorf("check Shopify sync store: %w", err)
+	}
+	if !connected {
+		return shopifysync.ErrStoreNotConnected
+	}
+	err := tx.QueryRow(ctx, `
+		INSERT INTO shopify_sync_runs(organization_id,store_id,mode,status,job_id)
+		SELECT $1,s.id,$3,'queued',COALESCE(NULLIF($4,''),gen_random_uuid()::text)
+		FROM shopify_stores s WHERE s.organization_id=$1 AND s.id=$2 AND s.status='connected'
+		ON CONFLICT DO NOTHING
+		RETURNING id::text,job_id,created_at`, organizationID, storeID, mode, jobID).
+		Scan(&runID, &resolvedJobID, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A concurrent manual/webhook request already guarantees a follow-up.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create Shopify sync run: %w", err)
+	}
+	payload, err := json.Marshal(map[string]any{"store_id": storeID, "run_id": runID, "mode": mode})
+	if err != nil {
+		return fmt.Errorf("encode Shopify sync payload: %w", err)
+	}
+	envelope := jobs.Envelope{Version: 1, ID: resolvedJobID, Type: jobs.TypeShopifyStoreSyncRequested, OrganizationID: organizationID, OccurredAt: createdAt, Payload: payload}
+	envelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("encode Shopify sync envelope: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO outbox_messages(organization_id,event_key,envelope) VALUES($1,$2,$3)`, organizationID, eventKeyPrefix+runID, envelopeJSON); err != nil {
+		return fmt.Errorf("enqueue Shopify sync outbox: %w", err)
 	}
 	return nil
 }
@@ -290,26 +373,12 @@ func removeMissingMirrorRows(ctx context.Context, tx pgx.Tx, request shopifysync
 	return nil
 }
 
-func (c *Client) CompleteSyncRun(ctx context.Context, request shopifysync.SyncRequest, counts shopifysync.ResourceCounts) error {
-	command, err := c.pool.Exec(ctx, `
-		UPDATE shopify_sync_runs SET status='completed',products_count=$4,variants_count=$5,
-		collections_count=$6,themes_count=$7,error_code=NULL,error_message=NULL,completed_at=now()
-		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status='running'`, request.OrganizationID,
-		request.StoreID, request.RunID, counts.Products, counts.Variants, counts.Collections, counts.Themes)
-	if err != nil {
-		return fmt.Errorf("complete Shopify sync run: %w", err)
-	}
-	if command.RowsAffected() == 0 {
-		return fmt.Errorf("Shopify sync run is not running")
-	}
-	return nil
-}
-
 func (c *Client) FailSyncRun(ctx context.Context, request shopifysync.SyncRequest, code, message string) error {
 	_, err := c.pool.Exec(ctx, `
-		UPDATE shopify_sync_runs SET status='failed',error_code=$4,error_message=$5,completed_at=now()
-		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status IN ('queued','running')`,
-		request.OrganizationID, request.StoreID, request.RunID, code, message)
+		UPDATE shopify_sync_runs SET status='failed',error_code=$5,error_message=$6,completed_at=now(),
+		lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL
+		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status='running' AND lease_owner=$4`,
+		request.OrganizationID, request.StoreID, request.RunID, request.LeaseOwner, code, message)
 	if err != nil {
 		return fmt.Errorf("fail Shopify sync run: %w", err)
 	}

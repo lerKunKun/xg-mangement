@@ -70,11 +70,10 @@ func main() {
 		logger.Error("object storage is unavailable", "error", err)
 		os.Exit(1)
 	}
-	jobQueue, err := queue.Connect(cfg.RabbitMQURL, cfg.RabbitMQQueue)
-	if err != nil {
-		logger.Error("RabbitMQ is unavailable", "error", err)
-		os.Exit(1)
-	}
+	// Outbox rows are durable in PostgreSQL. The publisher connects lazily and
+	// drops failed connections so the next outbox pass can reconnect without
+	// making transient RabbitMQ outages take down the API.
+	jobQueue := queue.NewLazyPublisher(cfg.RabbitMQURL, cfg.RabbitMQQueue, cfg.RabbitMQRetryDelay, cfg.ShopifySync.MaxAttempts)
 	defer func() { _ = jobQueue.Close() }()
 
 	secureCookies := cfg.Environment != "development"

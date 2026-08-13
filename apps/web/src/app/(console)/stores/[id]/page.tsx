@@ -91,6 +91,8 @@ export default function StoreDetailPage() {
       </div>
 
       {error ? <Alert variant="destructive"><AlertTitle>无法加载店铺数据</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+      {store?.status === "action_required" ? <Alert variant="destructive"><AlertTitle>Shopify 授权需要处理</AlertTitle><AlertDescription>访问令牌已失效或权限不足，请重新连接店铺后再同步。</AlertDescription></Alert> : null}
+      {store?.status === "disconnected" ? <Alert><AlertTitle>店铺已断开</AlertTitle><AlertDescription>该店铺当前不会接收同步或发布任务。</AlertDescription></Alert> : null}
 
       <section className="grid border-l border-t sm:grid-cols-2 xl:grid-cols-4">
         <Metric icon={Package} label="产品" value={latestCounts?.products} />
@@ -127,7 +129,8 @@ function Metric({ icon: Icon, label, value }: { icon: typeof Package; label: str
 
 function SyncRunRow({ run, index }: { run: SyncRun; index: number }) {
   const presentation = formatSyncStatus(run.status);
-  return <article className="grid grid-cols-[52px_minmax(0,1fr)]"><div className="border-r py-5 text-center font-mono text-xs text-muted-foreground">{String(index).padStart(2, "0")}</div><div className="p-5"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><Badge variant={presentation.tone}>{presentation.label}</Badge><span className="text-sm font-medium">{run.mode === "full" ? "全量同步" : "增量同步"}</span></div><time className="text-xs text-muted-foreground">{new Date(run.created_at).toLocaleString("zh-CN")}</time></div><div className="mt-4 grid grid-cols-2 gap-px border bg-border sm:grid-cols-5"><Count label="产品" value={run.counts.products} /><Count label="变体" value={run.counts.variants} /><Count label="集合" value={run.counts.collections} /><Count label="主题" value={run.counts.themes} /><Count label="合计" value={resourceTotal(run)} /></div>{run.error_message ? <p className="mt-3 text-sm text-destructive">{run.error_message}</p> : null}<p className="mt-3 truncate font-mono text-[11px] text-muted-foreground">RUN {run.id}</p></div></article>;
+  const duration = run.started_at && run.completed_at ? Math.max(0, Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)) : null;
+  return <article className="grid grid-cols-[52px_minmax(0,1fr)]"><div className="border-r py-5 text-center font-mono text-xs text-muted-foreground">{String(index).padStart(2, "0")}</div><div className="p-5"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><Badge variant={presentation.tone}>{presentation.label}</Badge><span className="text-sm font-medium">{run.mode === "full" ? "全量同步" : "增量同步"}</span>{duration !== null ? <span className="text-xs text-muted-foreground">耗时 {duration}s</span> : null}</div><time className="text-xs text-muted-foreground">{new Date(run.created_at).toLocaleString("zh-CN")}</time></div><div className="mt-4 grid grid-cols-2 gap-px border bg-border sm:grid-cols-5"><Count label="产品" value={run.counts.products} /><Count label="变体" value={run.counts.variants} /><Count label="集合" value={run.counts.collections} /><Count label="主题" value={run.counts.themes} /><Count label="合计" value={resourceTotal(run)} /></div>{run.error_message ? <p className="mt-3 text-sm text-destructive">{run.error_message}</p> : null}<p className="mt-3 truncate font-mono text-[11px] text-muted-foreground">RUN {run.id}</p></div></article>;
 }
 
 function Count({ label, value }: { label: string; value: number }) {

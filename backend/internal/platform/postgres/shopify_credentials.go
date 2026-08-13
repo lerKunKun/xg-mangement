@@ -21,7 +21,7 @@ func (c *Client) WithLockedConnection(ctx context.Context, organizationID, store
 	err = tx.QueryRow(ctx, `
 		SELECT s.organization_id::text, s.id::text, a.id::text, s.shop_domain, s.status,
 		       a.encrypted_credentials, a.expires_at, a.refresh_expires_at,
-		       cfg.public_config, cfg.encrypted_secrets, COALESCE(a.last_error, '')
+		       cfg.public_config, cfg.encrypted_secrets, COALESCE(a.last_error, ''), COALESCE(a.scopes, '{}')
 		FROM shopify_stores s
 		JOIN integration_accounts a ON a.id = s.integration_account_id
 		JOIN integration_configs cfg ON cfg.organization_id = s.organization_id
@@ -31,7 +31,7 @@ func (c *Client) WithLockedConnection(ctx context.Context, organizationID, store
 		&connection.OrganizationID, &connection.StoreID, &connection.AccountID,
 		&connection.Domain, &connection.Status, &connection.EncryptedCredentials,
 		&connection.ExpiresAt, &connection.RefreshExpiresAt, &connection.PublicConfig,
-		&connection.EncryptedSecrets, &connection.LastErrorCode,
+		&connection.EncryptedSecrets, &connection.LastErrorCode, &connection.GrantedScopes,
 	)
 	if err != nil {
 		return fmt.Errorf("lock Shopify connection: %w", err)
@@ -77,13 +77,14 @@ func nullBytes(value []byte) any {
 func (c *Client) ResolveSyncTarget(ctx context.Context, organizationID, storeID string) (shopifysync.SyncTarget, error) {
 	var target shopifysync.SyncTarget
 	err := c.pool.QueryRow(ctx, `
-		SELECT s.shop_domain, COALESCE(NULLIF(cfg.public_config->>'api_version',''), '2026-07')
+		SELECT s.shop_domain
 		FROM shopify_stores s
 		JOIN integration_configs cfg ON cfg.organization_id=s.organization_id AND cfg.provider='shopify' AND cfg.enabled=true
 		WHERE s.organization_id=$1 AND s.id=$2 AND s.status='connected'`, organizationID, storeID).
-		Scan(&target.Domain, &target.APIVersion)
+		Scan(&target.Domain)
 	if err != nil {
 		return shopifysync.SyncTarget{}, fmt.Errorf("resolve Shopify sync target: %w", err)
 	}
+	target.APIVersion = "2026-07"
 	return target, nil
 }

@@ -79,6 +79,18 @@ func TestTokenManagerMarksInvalidRefreshTokenForReauthorization(t *testing.T) {
 	}
 }
 
+func TestTokenManagerRejectsLegacyWriteScopes(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	connection := encryptedConnection(t, shopify.Token{AccessToken: "overprivileged"}, now.Add(time.Hour))
+	connection.GrantedScopes = []string{"read_products", "read_themes", "write_themes"}
+	repository := &credentialRepositoryStub{connection: connection}
+	manager := TokenManager{Repository: repository, Cipher: plainCipher{}, Refresher: &tokenRefresherStub{}, Clock: func() time.Time { return now }}
+	_, err := manager.AccessToken(context.Background(), "org-1", "store-1")
+	if !shopify.IsReauthorizationRequired(err) || repository.connection.Status != "action_required" {
+		t.Fatalf("AccessToken() error = %#v status = %q", err, repository.connection.Status)
+	}
+}
+
 func encryptedConnection(t *testing.T, token shopify.Token, expiresAt time.Time) StoreConnection {
 	t.Helper()
 	payload, err := json.Marshal(token)
@@ -95,6 +107,7 @@ func encryptedConnection(t *testing.T, token shopify.Token, expiresAt time.Time)
 		ExpiresAt:            &expiresAt,
 		PublicConfig:         json.RawMessage(`{"client_id":"client-id","api_version":"2026-07"}`),
 		EncryptedSecrets:     []byte(`{"client_secret":"client-secret"}`),
+		GrantedScopes:        []string{"read_products", "read_themes"},
 	}
 }
 

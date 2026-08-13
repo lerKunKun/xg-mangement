@@ -2,14 +2,12 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/xg-management/platform/backend/internal/httpapi"
-	"github.com/xg-management/platform/backend/internal/jobs"
+	"github.com/xg-management/platform/backend/internal/shopifysync"
 )
 
 func (c *Client) ResolveShopifyWebhookTarget(ctx context.Context, domain string) (httpapi.ShopifyWebhookTarget, error) {
@@ -79,32 +77,27 @@ func disconnectWebhookStore(ctx context.Context, tx pgx.Tx, event httpapi.Shopif
 }
 
 func enqueueWebhookSync(ctx context.Context, tx pgx.Tx, event httpapi.ShopifyWebhookEvent) error {
-	jobID := "shopify-webhook:" + event.WebhookID
-	var runID string
-	err := tx.QueryRow(ctx, `
-		INSERT INTO shopify_sync_runs(organization_id,store_id,mode,status,job_id)
-		SELECT $1,$2,$4,'queued',$3
-		WHERE NOT EXISTS(SELECT 1 FROM shopify_sync_runs WHERE organization_id=$1 AND store_id=$2 AND status IN ('queued','running'))
-		RETURNING id::text`, event.OrganizationID, event.StoreID, jobID, webhookSyncMode(event.Topic)).Scan(&runID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var storeStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM shopify_stores WHERE organization_id=$1 AND id=$2 FOR UPDATE`, event.OrganizationID, event.StoreID).Scan(&storeStatus); err != nil {
+		return fmt.Errorf("lock webhook Shopify store: %w", err)
+	}
+	if storeStatus != "connected" {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("create webhook Shopify sync run: %w", err)
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shopify_sync_runs WHERE organization_id=$1 AND store_id=$2 AND status IN ('queued','running'))`, event.OrganizationID, event.StoreID).Scan(&active); err != nil {
+		return fmt.Errorf("check active webhook Shopify sync: %w", err)
 	}
-	payload, err := json.Marshal(map[string]string{"store_id": event.StoreID, "run_id": runID, "mode": webhookSyncMode(event.Topic)})
-	if err != nil {
-		return fmt.Errorf("encode webhook sync payload: %w", err)
+	if active {
+		if _, err := tx.Exec(ctx, `UPDATE shopify_stores SET resync_requested=true,updated_at=now() WHERE organization_id=$1 AND id=$2`, event.OrganizationID, event.StoreID); err != nil {
+			return fmt.Errorf("request Shopify follow-up sync: %w", err)
+		}
+		return nil
 	}
-	envelope := jobs.Envelope{Version: 1, ID: jobID, Type: jobs.TypeShopifyStoreSyncRequested, OrganizationID: event.OrganizationID, OccurredAt: time.Now().UTC(), Payload: payload}
-	envelopeJSON, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("encode webhook sync envelope: %w", err)
+	if _, err := tx.Exec(ctx, `UPDATE shopify_stores SET resync_requested=false WHERE organization_id=$1 AND id=$2`, event.OrganizationID, event.StoreID); err != nil {
+		return fmt.Errorf("clear stale Shopify follow-up sync request: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO outbox_messages(organization_id,event_key,envelope) VALUES($1,$2,$3) ON CONFLICT(event_key) DO NOTHING`, event.OrganizationID, jobID, envelopeJSON); err != nil {
-		return fmt.Errorf("enqueue webhook sync outbox: %w", err)
-	}
-	return nil
+	return enqueueSyncRunTx(ctx, tx, event.OrganizationID, event.StoreID, "shopify-webhook:"+event.WebhookID, shopifysync.SyncMode(webhookSyncMode(event.Topic)), "shopify-webhook:")
 }
 
 // Webhooks currently schedule a full reconciliation because the Bulk queries

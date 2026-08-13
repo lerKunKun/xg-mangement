@@ -52,7 +52,7 @@ func createShopifySyncRun(repository ShopifySyncRepository) gin.HandlerFunc {
 func listShopifySyncRuns(repository ShopifySyncRepository) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		principal, _ := currentPrincipal(c)
-		runs, err := repository.ListSyncRuns(c.Request.Context(), principal.OrganizationID, c.Param("id"), 50)
+		runs, err := repository.ListSyncRuns(c.Request.Context(), principal.OrganizationID, c.Param("id"), 10)
 		if err != nil {
 			respondError(c, http.StatusInternalServerError, "sync_runs_unavailable", "The Shopify synchronization history could not be loaded.")
 			return

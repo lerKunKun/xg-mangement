@@ -34,6 +34,18 @@ func TestHandlerRejectsMissingRunIDAsPermanent(t *testing.T) {
 	}
 }
 
+func TestConcurrentSyncPreservesQueueAttempt(t *testing.T) {
+	err := classifyHandlerError(&Error{Code: "sync_already_running", Retryable: true})
+	var handlerErr *HandlerError
+	if !errors.As(err, &handlerErr) || !handlerErr.Retryable || !handlerErr.PreserveQueueAttempt() {
+		t.Fatalf("error = %#v, want retryable attempt-preserving handler error", err)
+	}
+	ordinary := classifyHandlerError(&Error{Code: "provider_busy", Retryable: true})
+	if !errors.As(ordinary, &handlerErr) || handlerErr.PreserveQueueAttempt() {
+		t.Fatalf("ordinary retry error = %#v, should consume an attempt", ordinary)
+	}
+}
+
 type syncProcessorStub struct{ request SyncRequest }
 
 func (s *syncProcessorStub) Sync(_ context.Context, request SyncRequest) error {

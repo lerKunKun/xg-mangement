@@ -24,3 +24,22 @@ func TestShopifyMirrorMigrationContainsTenantScopedTables(t *testing.T) {
 		}
 	}
 }
+
+func TestShopifyMirrorHardeningMigration(t *testing.T) {
+	body, err := files.ReadFile("000004_shopify_mirror_hardening.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		"CREATE UNIQUE INDEX shopify_stores_domain_global_unique",
+		"ADD COLUMN lease_owner TEXT",
+		"ADD COLUMN resync_requested BOOLEAN",
+		"shopify_variants_product_tenant_fk",
+		"'ARCHIVED'",
+		"'LOCKED'",
+	} {
+		if !strings.Contains(string(body), fragment) {
+			t.Fatalf("hardening migration missing %q", fragment)
+		}
+	}
+}

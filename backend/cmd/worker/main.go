@@ -46,33 +46,70 @@ func main() {
 	}
 	handler := shopifysync.Handler{Syncer: syncService}
 
-	broker, err := queue.ConnectWithOptions(cfg.RabbitMQURL, cfg.RabbitMQQueue, cfg.RabbitMQRetryDelay, cfg.ShopifySync.MaxAttempts)
-	if err != nil {
-		logger.Error("RabbitMQ is unavailable", "error", err)
-		os.Exit(1)
-	}
-	defer func() { _ = broker.Close() }()
-	deliveries, err := broker.Consume()
-	if err != nil {
-		logger.Error("RabbitMQ consumer could not start", "error", err)
-		os.Exit(1)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	logger.Info("worker listening", "queue", cfg.RabbitMQQueue, "max_attempts", cfg.ShopifySync.MaxAttempts)
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("worker shutdown requested")
-			return
-		case delivery, ok := <-deliveries:
-			if !ok {
-				logger.Error("RabbitMQ delivery channel closed")
-				return
+	runConsumer(ctx, logger, cfg, database, handler)
+}
+
+func runConsumer(ctx context.Context, logger *slog.Logger, cfg config.Config, store jobStore, handler shopifysync.Handler) {
+	const reconnectDelay = 5 * time.Second
+	for ctx.Err() == nil {
+		broker, err := queue.ConnectWithOptions(cfg.RabbitMQURL, cfg.RabbitMQQueue, cfg.RabbitMQRetryDelay, cfg.ShopifySync.MaxAttempts)
+		if err != nil {
+			logger.Error("RabbitMQ is unavailable; worker will reconnect", "error", err, "retry_in", reconnectDelay)
+			if !waitForReconnect(ctx, reconnectDelay) {
+				break
 			}
-			processDelivery(ctx, logger, database, handler, delivery)
+			continue
 		}
+		deliveries, err := broker.Consume()
+		if err != nil {
+			logger.Error("RabbitMQ consumer could not start; worker will reconnect", "error", err)
+			_ = broker.Close()
+			if !waitForReconnect(ctx, reconnectDelay) {
+				break
+			}
+			continue
+		}
+		logger.Info("worker listening", "queue", cfg.RabbitMQQueue, "max_attempts", cfg.ShopifySync.MaxAttempts)
+		publisherClosed := broker.PublisherClosed()
+		connected := true
+		for connected {
+			select {
+			case <-ctx.Done():
+				connected = false
+			case delivery, ok := <-deliveries:
+				if !ok {
+					logger.Error("RabbitMQ delivery channel closed; worker will reconnect")
+					connected = false
+					continue
+				}
+				if err := processDelivery(ctx, logger, store, handler, delivery); err != nil {
+					logger.Error("RabbitMQ message handoff failed; worker will reconnect", "error", err)
+					connected = false
+				}
+			case publisherErr, ok := <-publisherClosed:
+				if ok && publisherErr != nil {
+					logger.Error("RabbitMQ publisher channel closed; worker will reconnect", "error", publisherErr)
+				} else {
+					logger.Error("RabbitMQ publisher channel closed; worker will reconnect")
+				}
+				connected = false
+			}
+		}
+		_ = broker.Close()
+	}
+	logger.Info("worker shutdown requested")
+}
+
+func waitForReconnect(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -81,40 +118,38 @@ type jobStore interface {
 	MarkJobProcessed(context.Context, string, string, string) error
 }
 
-func processDelivery(ctx context.Context, logger *slog.Logger, store jobStore, handler shopifysync.Handler, delivery queue.Delivery) {
+func processDelivery(ctx context.Context, logger *slog.Logger, store jobStore, handler shopifysync.Handler, delivery queue.Delivery) error {
 	envelope, err := delivery.Envelope()
 	if err != nil {
 		logger.Warn("dead-lettering invalid job", "error", err)
-		_ = delivery.DeadLetter(ctx, err)
-		return
+		return delivery.DeadLetter(ctx, err)
 	}
 	processed, err := store.IsJobProcessed(ctx, envelope.ID)
 	if err != nil {
 		logger.Error("processed job lookup failed", "job_id", envelope.ID, "error", err)
-		_ = delivery.Retry(ctx, err)
-		return
+		return delivery.Retry(ctx, err)
 	}
 	if processed {
-		_ = delivery.Ack()
-		return
+		return delivery.Ack()
 	}
 	err = safeHandle(ctx, handler, envelope)
 	if err != nil {
 		logger.Warn("job handling failed", "job_id", envelope.ID, "job_type", envelope.Type, "retryable", shopifysync.IsRetryable(err), "error", err)
 		if shopifysync.IsRetryable(err) {
-			_ = delivery.Retry(ctx, err)
+			return delivery.Retry(ctx, err)
 		} else {
-			_ = delivery.DeadLetter(ctx, err)
+			return delivery.DeadLetter(ctx, err)
 		}
-		return
 	}
 	if err := store.MarkJobProcessed(ctx, envelope.ID, envelope.OrganizationID, envelope.Type); err != nil {
 		logger.Error("recording processed job failed", "job_id", envelope.ID, "error", err)
-		_ = delivery.Retry(ctx, err)
-		return
+		return delivery.Retry(ctx, err)
 	}
-	_ = delivery.Ack()
+	if err := delivery.Ack(); err != nil {
+		return err
+	}
 	logger.Info("job completed", "job_id", envelope.ID, "job_type", envelope.Type, "organization_id", envelope.OrganizationID)
+	return nil
 }
 
 func safeHandle(ctx context.Context, handler shopifysync.Handler, envelope jobs.Envelope) (err error) {

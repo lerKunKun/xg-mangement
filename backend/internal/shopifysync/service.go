@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	defaultPollInterval = 5 * time.Second
-	defaultSyncTimeout  = 15 * time.Minute
+	defaultPollInterval      = 5 * time.Second
+	defaultSyncTimeout       = 15 * time.Minute
+	defaultHeartbeatInterval = 30 * time.Second
 )
 
 const productsBulkQuery = `{
@@ -40,9 +41,9 @@ const themesQuery = `query Themes {
 }`
 
 type SyncRepository interface {
-	StartSyncRun(context.Context, SyncRequest) error
+	StartSyncRun(context.Context, SyncRequest) (string, error)
+	HeartbeatSyncRun(context.Context, SyncRequest) error
 	ReplaceMirror(context.Context, SyncRequest, MirrorBatch) error
-	CompleteSyncRun(context.Context, SyncRequest, ResourceCounts) error
 	FailSyncRun(context.Context, SyncRequest, string, string) error
 }
 
@@ -87,7 +88,8 @@ func (s Service) Sync(ctx context.Context, request SyncRequest) (returnedErr err
 	if request.Mode == "" {
 		request.Mode = SyncModeFull
 	}
-	if err := s.Repository.StartSyncRun(ctx, request); err != nil {
+	leaseOwner, err := s.Repository.StartSyncRun(ctx, request)
+	if err != nil {
 		if errors.Is(err, ErrSyncAlreadyCompleted) {
 			return nil
 		}
@@ -96,7 +98,11 @@ func (s Service) Sync(ctx context.Context, request SyncRequest) (returnedErr err
 		}
 		return err
 	}
+	request.LeaseOwner = leaseOwner
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			returnedErr = &Error{Code: "sync_panic", Message: fmt.Sprintf("Shopify synchronization panicked: %v", recovered), Retryable: true}
+		}
 		if returnedErr == nil {
 			return
 		}
@@ -110,6 +116,29 @@ func (s Service) Sync(ctx context.Context, request SyncRequest) (returnedErr err
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	heartbeatContext, stopHeartbeatContext := context.WithCancel(ctx)
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		err := s.maintainLease(heartbeatContext, request)
+		if err != nil {
+			cancel()
+		}
+		heartbeatDone <- err
+	}()
+	heartbeatStopped := false
+	stopHeartbeat := func() error {
+		if heartbeatStopped {
+			return nil
+		}
+		heartbeatStopped = true
+		stopHeartbeatContext()
+		return <-heartbeatDone
+	}
+	defer func() {
+		if err := stopHeartbeat(); err != nil && (returnedErr == nil || errors.Is(returnedErr, context.Canceled)) {
+			returnedErr = err
+		}
+	}()
 
 	target, err := s.Stores.ResolveSyncTarget(ctx, request.OrganizationID, request.StoreID)
 	if err != nil {
@@ -137,13 +166,31 @@ func (s Service) Sync(ctx context.Context, request SyncRequest) (returnedErr err
 		now = s.Clock().UTC()
 	}
 	batch := MirrorBatch{Products: products, Variants: variants, Collections: collections, Themes: themes, SyncedAt: now}
+	if err := s.Repository.HeartbeatSyncRun(ctx, request); err != nil {
+		return err
+	}
 	if err := s.Repository.ReplaceMirror(ctx, request, batch); err != nil {
 		return err
 	}
-	if err := s.Repository.CompleteSyncRun(ctx, request, batch.Counts()); err != nil {
+	if err := stopHeartbeat(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s Service) maintainLease(ctx context.Context, request SyncRequest) error {
+	ticker := time.NewTicker(defaultHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := s.Repository.HeartbeatSyncRun(ctx, request); err != nil {
+				return &Error{Code: "sync_lease_renewal_failed", Message: "Shopify sync lease could not be renewed: " + err.Error(), Retryable: true}
+			}
+		}
+	}
 }
 
 func (s Service) syncProducts(ctx context.Context, target SyncTarget, token string) ([]Product, []Variant, error) {

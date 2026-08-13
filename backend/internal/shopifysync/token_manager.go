@@ -12,6 +12,8 @@ import (
 
 const tokenRefreshSkew = 5 * time.Minute
 
+var phaseOneTokenScopes = []string{"read_products", "read_themes"}
+
 type CredentialCipher interface {
 	Encrypt([]byte) ([]byte, error)
 	Decrypt([]byte) ([]byte, error)
@@ -42,6 +44,10 @@ func (m TokenManager) AccessToken(ctx context.Context, organizationID, storeID s
 	}
 	var accessToken string
 	err := m.Repository.WithLockedConnection(ctx, organizationID, storeID, func(connection StoreConnection) (CredentialUpdate, error) {
+		if !exactScopeSet(connection.GrantedScopes, phaseOneTokenScopes) {
+			err := &shopify.ProviderError{StatusCode: 401, Code: "reauthorization_required", Message: "Shopify authorization must be renewed with the Phase 1 read-only scopes"}
+			return actionRequiredUpdate(), err
+		}
 		token, err := m.decryptToken(connection.EncryptedCredentials)
 		if err != nil {
 			return CredentialUpdate{}, err
@@ -92,6 +98,22 @@ func (m TokenManager) AccessToken(ctx context.Context, organizationID, storeID s
 		return "", err
 	}
 	return accessToken, nil
+}
+
+func exactScopeSet(granted, required []string) bool {
+	if len(granted) != len(required) {
+		return false
+	}
+	values := make(map[string]bool, len(granted))
+	for _, scope := range granted {
+		values[strings.TrimSpace(scope)] = true
+	}
+	for _, scope := range required {
+		if !values[scope] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m TokenManager) decryptToken(ciphertext []byte) (shopify.Token, error) {
