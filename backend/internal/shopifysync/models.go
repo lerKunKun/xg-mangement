@@ -11,6 +11,7 @@ import (
 var (
 	ErrSyncAlreadyRunning   = errors.New("Shopify sync is already running")
 	ErrSyncAlreadyCompleted = errors.New("Shopify sync is already completed")
+	ErrStoreNotConnected    = errors.New("Shopify store is missing or not connected")
 )
 
 type SyncMode string

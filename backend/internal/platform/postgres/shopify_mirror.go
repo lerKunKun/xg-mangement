@@ -160,7 +160,7 @@ func (c *Client) CreateSyncRun(ctx context.Context, organizationID, storeID, req
 			return shopifysync.SyncRun{}, shopifysync.ErrSyncAlreadyRunning
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
-			return shopifysync.SyncRun{}, fmt.Errorf("connected Shopify store was not found")
+			return shopifysync.SyncRun{}, shopifysync.ErrStoreNotConnected
 		}
 		return shopifysync.SyncRun{}, fmt.Errorf("create Shopify sync run: %w", err)
 	}

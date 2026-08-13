@@ -670,6 +670,19 @@ Shopify
 
 实现顺序不可颠倒：部署系统依赖真实同步数据做预检，审批系统依赖已发布蓝图版本，最终发布依赖前三部分提供的契约。
 
+### 19.1 第一阶段运行时实现状态
+
+截至 2026-08-13，第一阶段已实现：
+
+- Shopify expiring offline token 的行锁轮换和重新授权状态；
+- 产品、变体、集合、主题的 GraphQL Bulk 全量镜像；
+- 同步运行、失败摘要、资源计数与目标店主题查询 API；
+- Shopify webhook HMAC、去重、事务 outbox；
+- RabbitMQ 有界重试、死信和 Worker 幂等；
+- 店铺详情页同步时间轴与目标店主题状态。
+
+资源 webhook 当前使用 full reconcile，保证删除事件能清理本地缺失资源。真正按资源增量查询和显式删除集在后续优化，不能在两者查询语义不一致时标记为 incremental。
+
 ## 20. 官方约束依据
 
 - Theme 创建默认产生未发布主题；写入主题需要 `write_themes` 和 Shopify 豁免：<https://shopify.dev/docs/api/admin-graphql/latest/mutations/themeCreate>

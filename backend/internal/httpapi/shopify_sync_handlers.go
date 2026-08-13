@@ -37,6 +37,10 @@ func createShopifySyncRun(repository ShopifySyncRepository) gin.HandlerFunc {
 			respondError(c, http.StatusConflict, "sync_already_running", "This store already has an active synchronization.")
 			return
 		}
+		if errors.Is(err, shopifysync.ErrStoreNotConnected) {
+			respondError(c, http.StatusNotFound, "store_not_connected", "The Shopify store does not exist or is not connected.")
+			return
+		}
 		if err != nil {
 			respondError(c, http.StatusInternalServerError, "sync_create_failed", "The Shopify synchronization could not be queued.")
 			return

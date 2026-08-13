@@ -67,6 +67,18 @@ func TestCreateSyncRunReportsActiveConflict(t *testing.T) {
 	assertErrorCode(t, response, "sync_already_running")
 }
 
+func TestCreateSyncRunReportsMissingOrDisconnectedStore(t *testing.T) {
+	principal := auth.Principal{UserID: "user-1", OrganizationID: "org-1", Permissions: []string{string(rbac.PermissionShopifySync)}}
+	repository := &syncRunRepositoryStub{createErr: shopifysync.ErrStoreNotConnected}
+	router := httpapi.NewRouter(httpapi.Dependencies{Authenticator: authenticatorStub{principal: principal, authenticated: true}, Authorizer: authorizerStub{}, ShopifySync: repository})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/stores/store-missing/sync-runs", strings.NewReader(`{"mode":"full"}`)))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	assertErrorCode(t, response, "store_not_connected")
+}
+
 type syncRunRepositoryStub struct {
 	organizationID string
 	storeID        string

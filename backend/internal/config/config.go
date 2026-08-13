@@ -124,7 +124,7 @@ func Load(lookup func(string) string) (Config, error) {
 				RedirectURI:  lookup("SHOPIFY_REDIRECT_URI"),
 			},
 			APIVersion: valueOrDefault(lookup("SHOPIFY_API_VERSION"), "2026-07"),
-			Scopes:     valueOrDefault(lookup("SHOPIFY_SCOPES"), "read_products,write_products,read_orders"),
+			Scopes:     valueOrDefault(lookup("SHOPIFY_SCOPES"), "read_products,write_products,read_orders,read_themes"),
 		},
 		ShopifySync: ShopifySyncConfig{PollInterval: pollInterval, Timeout: syncTimeout, MaxAttempts: maxAttempts},
 		MetaAds: OAuthProviderConfig{
