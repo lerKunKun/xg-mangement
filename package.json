@@ -1,0 +1,12 @@
+{
+  "name": "xg-management",
+  "private": true,
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build:web": "npm --prefix apps/web run build",
+    "lint:web": "npm --prefix apps/web run lint",
+    "test:web": "npm --prefix apps/web run test",
+    "test": "npm run test:web",
+    "verify": "npm run test:web && npm run lint:web && npm run build:web"
+  }
+}

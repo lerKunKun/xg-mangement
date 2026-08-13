@@ -1,0 +1,146 @@
+name: xg-management
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: xg
+      POSTGRES_USER: xg
+      POSTGRES_PASSWORD: xg
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xg -d xg"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: xg
+      RABBITMQ_DEFAULT_PASS: xg
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - >-
+        until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin;
+        do sleep 1; done;
+        /usr/bin/mc mb --ignore-existing local/xg-assets
+    restart: "no"
+
+  migrate:
+    image: postgres:17-alpine
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGURL: postgres://xg:xg@postgres:5432/xg?sslmode=disable
+    volumes:
+      - ./backend/migrations:/migrations:ro
+    entrypoint: ["psql"]
+    command: ["postgres://xg:xg@postgres:5432/xg?sslmode=disable", "-v", "ON_ERROR_STOP=1", "-f", "/migrations/000001_initial.up.sql"]
+
+  api:
+    profiles: ["full"]
+    build:
+      context: ./backend
+      target: runtime
+    environment:
+      APP_ENV: development
+      HTTP_ADDRESS: :8080
+      AUTH_DEV_LOGIN_ENABLED: "true"
+      SESSION_SECRET: local-development-session-secret-32
+      DATABASE_URL: postgres://xg:xg@postgres:5432/xg?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://xg:xg@rabbitmq:5672/
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_REGION: auto
+      OBJECT_STORAGE_BUCKET: xg-assets
+      OBJECT_STORAGE_ACCESS_KEY_ID: minioadmin
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: minioadmin
+      OBJECT_STORAGE_PATH_STYLE: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  worker:
+    profiles: ["full"]
+    build:
+      context: ./backend
+      target: runtime
+    command: ["/app/worker"]
+    environment:
+      APP_ENV: development
+      RABBITMQ_URL: amqp://xg:xg@rabbitmq:5672/
+      RABBITMQ_QUEUE: xg.jobs
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  web:
+    profiles: ["full"]
+    build:
+      context: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+  minio-data:
