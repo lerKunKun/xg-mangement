@@ -33,6 +33,7 @@
 - 店铺方案草稿、变量覆盖、能力预检、差异预览。
 - 钉钉 OA 审批发起、结果同步和审批后发布。
 - 分阶段部署、资源映射、失败重试、人工确认和审计。
+- 系统内查看目标店主题、预览未发布主题、发布为主主题和回退到上一主主题。
 
 ### 2.2 非目标
 
@@ -156,6 +157,24 @@ Store Type Version
 ```
 
 提交审批时，Composer 解析所有逻辑引用、固定依赖版本、计算文件哈希，并产出不可变 Release Manifest。
+
+### 4.4 系统内主题中心
+
+系统内主题中心同时展示蓝图库 Theme Version 和目标店已安装主题，但二者保持不同身份：
+
+- **蓝库主题**：组织内可复用的 Theme ZIP、Style Preset 和版本，不属于某家 Shopify 店。
+- **店铺主题**：同步自目标店的 `OnlineStoreTheme`，具有 Shopify GID、`MAIN/UNPUBLISHED/DEVELOPMENT` Role 和处理状态。
+
+用户可以在系统内完成：
+
+1. 从蓝图库选择 Theme 与 Style，生成目标店专用 ZIP。
+2. 安装为目标店 `UNPUBLISHED` Theme。
+3. 打开 Shopify Theme Preview URL 预览。
+4. 查看文件处理状态、部署版本和来源 Release。
+5. 对已通过钉钉审批且 Activation Policy 包含主题发布的 Release，调用 `themePublish` 设为主主题。
+6. 记录发布前的主主题 GID；需要回退时创建一份只包含主题切换的 Rollback Release，经过钉钉审批后在系统内发布旧主题。
+
+不得提供绕过 Release 直接输入任意 Theme GID 发布的接口。系统内“发布主题”按钮创建或消费一个不可变 Theme Release；未通过审批、快照哈希不一致、主题仍在 Processing、主题处理失败或目标店主主题已发生漂移时必须拒绝发布。
 
 ## 5. 蓝图内容模型
 
@@ -326,6 +345,7 @@ Patch 只能操作预检允许的路径。若目标基础主题版本不匹配�
 - `shopify_sync_runs`：全量/增量同步运行。
 - `shopify_products`、`shopify_variants`、`shopify_collections`：目标店资源镜像。
 - `shopify_resource_snapshots`：主题、Markets、配送、政策、菜单和自定义数据摘要。
+- `shopify_themes`：目标店主题 GID、名称、Role、处理状态、Theme Store ID、来源 Release 和最近同步时间。
 - `shopify_webhook_events`：沿用现有 `webhook_events` 并补充 payload object key、处理状态和错误。
 
 镜像表以 `(organization_id, store_id, shopify_gid)` 隔离；不得使用仅 Shopify GID 的全局唯一约束。
@@ -507,6 +527,7 @@ Shopify 多资源发布不是数据库事务，设计采用补偿而非假装原
 | 模块 | 自动化方式 | 默认安全状态 | 主要权限/限制 |
 |---|---|---|---|
 | Theme ZIP | `themeCreate` | UNPUBLISHED | `write_themes` 且需要主题写入豁免 |
+| Theme 发布 | `themePublish` | MAIN | 只能有一个 MAIN；需要 `write_themes`、豁免和已审批 Release |
 | 图片/视频 | `stagedUploadsCreate` + `fileCreate` | 已上传未引用 | Files 相关权限，视频需文件大小 |
 | 产品 | `productSet` | DRAFT | `write_products` |
 | 元字段 | Definition API + `metafieldsSet` | 定义已创建 | 对应资源及 namespace 权限 |
@@ -564,6 +585,9 @@ Shopify
 - `/shopify/sync-runs`：同步运行与重试。
 - `/blueprints/store-types`：店铺类型与版本。
 - `/blueprints/themes`：Theme Package、版本、上传和解析。
+- `/stores/:id/themes`：目标店主题列表、状态同步和预览链接。
+- `/deployment-releases/:id/publish-theme`：只允许发布该 Release 资源 Mapping 中已审批的目标主题。
+- `/deployment-releases/:id/create-theme-rollback`：以发布前主主题为目标创建回退 Release。
 - `/blueprints/styles`：风格预设与预览。
 - `/blueprints/assets`：预签名上传、确认、列表和归档。
 - `/blueprints/catalog-templates`：产品与集合模板。
