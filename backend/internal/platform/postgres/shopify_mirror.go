@@ -108,13 +108,29 @@ func (c *Client) StartSyncRun(ctx context.Context, request shopifysync.SyncReque
 	command, err := c.pool.Exec(ctx, `
 		UPDATE shopify_sync_runs SET status='running', started_at=COALESCE(started_at, now()),
 		    completed_at=NULL, error_code=NULL, error_message=NULL
-		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status IN ('queued','running')`,
+		WHERE organization_id=$1 AND store_id=$2 AND id=$3 AND status IN ('queued','failed')`,
 		request.OrganizationID, request.StoreID, request.RunID)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return shopifysync.ErrSyncAlreadyRunning
+		}
 		return fmt.Errorf("start Shopify sync run: %w", err)
 	}
 	if command.RowsAffected() == 0 {
-		return fmt.Errorf("Shopify sync run is missing or no longer active")
+		var status shopifysync.SyncStatus
+		err := c.pool.QueryRow(ctx, `SELECT status FROM shopify_sync_runs WHERE organization_id=$1 AND store_id=$2 AND id=$3`, request.OrganizationID, request.StoreID, request.RunID).Scan(&status)
+		if err != nil {
+			return fmt.Errorf("find Shopify sync run state: %w", err)
+		}
+		switch status {
+		case shopifysync.SyncStatusCompleted:
+			return shopifysync.ErrSyncAlreadyCompleted
+		case shopifysync.SyncStatusRunning:
+			return shopifysync.ErrSyncAlreadyRunning
+		default:
+			return fmt.Errorf("Shopify sync run cannot start from status %q", status)
+		}
 	}
 	return nil
 }

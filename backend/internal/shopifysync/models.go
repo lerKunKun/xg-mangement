@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-var ErrSyncAlreadyRunning = errors.New("Shopify sync is already running")
+var (
+	ErrSyncAlreadyRunning   = errors.New("Shopify sync is already running")
+	ErrSyncAlreadyCompleted = errors.New("Shopify sync is already completed")
+)
 
 type SyncMode string
 

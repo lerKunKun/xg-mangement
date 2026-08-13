@@ -88,6 +88,12 @@ func (s Service) Sync(ctx context.Context, request SyncRequest) (returnedErr err
 		request.Mode = SyncModeFull
 	}
 	if err := s.Repository.StartSyncRun(ctx, request); err != nil {
+		if errors.Is(err, ErrSyncAlreadyCompleted) {
+			return nil
+		}
+		if errors.Is(err, ErrSyncAlreadyRunning) {
+			return &Error{Code: "sync_already_running", Message: "Shopify synchronization is already running", Retryable: true}
+		}
 		return err
 	}
 	defer func() {

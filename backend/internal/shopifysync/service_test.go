@@ -2,6 +2,7 @@ package shopifysync
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -50,16 +51,42 @@ func TestServiceSyncDoesNotReplaceMirrorWhenBulkFails(t *testing.T) {
 	}
 }
 
+func TestServiceSyncTreatsCompletedRunAsIdempotentSuccess(t *testing.T) {
+	sequence := []string{}
+	repository := &syncRepositoryStub{sequence: &sequence, startErr: ErrSyncAlreadyCompleted}
+	service := Service{Repository: repository, Tokens: accessTokenStub{sequence: &sequence}, Stores: storeResolverStub{}, Shopify: &bulkClientStub{sequence: &sequence}}
+
+	if err := service.Sync(context.Background(), SyncRequest{OrganizationID: "org-1", StoreID: "store-1", RunID: "run-1", Mode: SyncModeFull}); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if strings.Join(sequence, ",") != "start-run" || repository.failCalls != 0 {
+		t.Fatalf("sequence = %v, fail calls = %d", sequence, repository.failCalls)
+	}
+}
+
+func TestServiceSyncClassifiesConcurrentRunAsRetryable(t *testing.T) {
+	sequence := []string{}
+	repository := &syncRepositoryStub{sequence: &sequence, startErr: ErrSyncAlreadyRunning}
+	service := Service{Repository: repository, Tokens: accessTokenStub{sequence: &sequence}, Stores: storeResolverStub{}, Shopify: &bulkClientStub{sequence: &sequence}}
+
+	err := service.Sync(context.Background(), SyncRequest{OrganizationID: "org-1", StoreID: "store-1", RunID: "run-1", Mode: SyncModeFull})
+	var syncErr *Error
+	if !errors.As(err, &syncErr) || !syncErr.Retryable || syncErr.Code != "sync_already_running" {
+		t.Fatalf("Sync() error = %#v", err)
+	}
+}
+
 type syncRepositoryStub struct {
 	sequence     *[]string
 	replaced     MirrorBatch
 	replaceCalls int
 	failCalls    int
+	startErr     error
 }
 
 func (r *syncRepositoryStub) StartSyncRun(context.Context, SyncRequest) error {
 	*r.sequence = append(*r.sequence, "start-run")
-	return nil
+	return r.startErr
 }
 func (r *syncRepositoryStub) ReplaceMirror(_ context.Context, _ SyncRequest, batch MirrorBatch) error {
 	*r.sequence = append(*r.sequence, "replace-mirror")
