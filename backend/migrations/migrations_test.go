@@ -17,6 +17,7 @@ func TestShopifyMirrorMigrationContainsTenantScopedTables(t *testing.T) {
 		"CREATE TABLE shopify_themes",
 		"CREATE TABLE outbox_messages",
 		"CHECK (status IN ('queued', 'running', 'completed', 'failed'))",
+		"('shopify:sync', 'Synchronize Shopify store resources')",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("migration missing %q", fragment)

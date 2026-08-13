@@ -137,3 +137,11 @@ CREATE TABLE outbox_messages (
 CREATE INDEX outbox_messages_pending_idx
     ON outbox_messages (status, available_at, created_at)
     WHERE status IN ('pending', 'failed');
+
+INSERT INTO permissions (code, description) VALUES
+    ('shopify:sync', 'Synchronize Shopify store resources')
+ON CONFLICT (code) DO UPDATE SET description = EXCLUDED.description;
+
+INSERT INTO role_permissions(role_id, permission_code)
+SELECT id, 'shopify:sync' FROM roles WHERE name = 'Operator'
+ON CONFLICT DO NOTHING;

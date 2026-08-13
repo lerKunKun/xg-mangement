@@ -2,10 +2,13 @@ package shopifysync
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+var ErrSyncAlreadyRunning = errors.New("Shopify sync is already running")
 
 type SyncMode string
 

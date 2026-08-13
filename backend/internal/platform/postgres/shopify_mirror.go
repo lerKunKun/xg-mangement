@@ -3,12 +3,15 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/xg-management/platform/backend/internal/jobs"
 	"github.com/xg-management/platform/backend/internal/shopifysync"
 )
 
@@ -114,6 +117,53 @@ func (c *Client) StartSyncRun(ctx context.Context, request shopifysync.SyncReque
 		return fmt.Errorf("Shopify sync run is missing or no longer active")
 	}
 	return nil
+}
+
+func (c *Client) CreateSyncRun(ctx context.Context, organizationID, storeID, requestedBy string, mode shopifysync.SyncMode) (shopifysync.SyncRun, error) {
+	if mode == "" {
+		mode = shopifysync.SyncModeFull
+	}
+	if mode != shopifysync.SyncModeFull && mode != shopifysync.SyncModeIncremental {
+		return shopifysync.SyncRun{}, fmt.Errorf("unsupported sync mode %q", mode)
+	}
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return shopifysync.SyncRun{}, fmt.Errorf("begin Shopify sync request: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var run shopifysync.SyncRun
+	err = tx.QueryRow(ctx, `
+		INSERT INTO shopify_sync_runs(organization_id,store_id,mode,status,requested_by,job_id)
+		SELECT $1,s.id,$3,'queued',$4,gen_random_uuid()::text
+		FROM shopify_stores s WHERE s.organization_id=$1 AND s.id=$2 AND s.status='connected'
+		RETURNING id::text,store_id::text,mode,status,job_id,created_at`, organizationID, storeID, mode, requestedBy).
+		Scan(&run.ID, &run.StoreID, &run.Mode, &run.Status, &run.JobID, &run.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return shopifysync.SyncRun{}, shopifysync.ErrSyncAlreadyRunning
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return shopifysync.SyncRun{}, fmt.Errorf("connected Shopify store was not found")
+		}
+		return shopifysync.SyncRun{}, fmt.Errorf("create Shopify sync run: %w", err)
+	}
+	payload, err := json.Marshal(map[string]any{"store_id": run.StoreID, "run_id": run.ID, "mode": run.Mode})
+	if err != nil {
+		return shopifysync.SyncRun{}, err
+	}
+	envelope := jobs.Envelope{Version: 1, ID: run.JobID, Type: jobs.TypeShopifyStoreSyncRequested, OrganizationID: organizationID, OccurredAt: run.CreatedAt, Payload: payload}
+	envelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		return shopifysync.SyncRun{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO outbox_messages(organization_id,event_key,envelope) VALUES($1,$2,$3)`, organizationID, "shopify-sync:"+run.ID, envelopeJSON); err != nil {
+		return shopifysync.SyncRun{}, fmt.Errorf("enqueue Shopify sync run: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return shopifysync.SyncRun{}, fmt.Errorf("commit Shopify sync request: %w", err)
+	}
+	return run, nil
 }
 
 func (c *Client) ReplaceMirror(ctx context.Context, request shopifysync.SyncRequest, input shopifysync.MirrorBatch) error {

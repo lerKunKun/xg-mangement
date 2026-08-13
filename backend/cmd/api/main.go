@@ -107,6 +107,7 @@ func main() {
 		Sessions:        sessions,
 		IntegrationFlow: integrationFlow,
 		Webhooks:        webhooks,
+		ShopifySync:     database,
 		DevLoginEnabled: cfg.Auth.DevLoginEnabled,
 		SecureCookies:   secureCookies,
 		SessionTTL:      12 * time.Hour,

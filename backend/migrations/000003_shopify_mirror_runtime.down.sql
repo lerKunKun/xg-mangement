@@ -13,3 +13,5 @@ DROP TABLE IF EXISTS shopify_collections;
 DROP TABLE IF EXISTS shopify_variants;
 DROP TABLE IF EXISTS shopify_products;
 DROP TABLE IF EXISTS shopify_sync_runs;
+DELETE FROM role_permissions WHERE permission_code = 'shopify:sync';
+DELETE FROM permissions WHERE code = 'shopify:sync';
