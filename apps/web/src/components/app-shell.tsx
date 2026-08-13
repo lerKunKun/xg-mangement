@@ -1,87 +1,83 @@
-import {
-  Boxes,
-  Building2,
-  ChartNoAxesCombined,
-  ChevronDown,
-  KeyRound,
-  PackageOpen,
-  PlugZap,
-  ShieldCheck,
-} from "lucide-react";
+"use client";
 
-import { MobileNavigation } from "@/components/mobile-navigation";
-import { StatusRail } from "@/components/status-rail";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import type { NavigationIcon } from "@/lib/navigation";
-import { getNavigation } from "@/lib/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname } from "next/navigation";
 
-const icons: Record<NavigationIcon, typeof ChartNoAxesCombined> = {
-  overview: ChartNoAxesCombined,
-  stores: Building2,
-  assets: PackageOpen,
-  approvals: Boxes,
-  integrations: PlugZap,
-  access: KeyRound,
+import { AppSidebar } from "@/components/app-sidebar";
+import { useAuth } from "@/components/auth-provider";
+import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
+import { Separator } from "@/components/ui/separator";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
+import { Skeleton } from "@/components/ui/skeleton";
+import { api, type MenuRecord } from "@/lib/api";
+import { buildNavigationTree, getNavigation, type NavigationNode } from "@/lib/navigation";
+
+const routeLabels: Record<string, [string, string]> = {
+  "/dashboard": ["概览", "工作台"],
+  "/stores": ["店铺资产", "Shopify 店铺"],
+  "/integrations/dingtalk": ["平台集成", "钉钉"],
+  "/integrations/shopify": ["平台集成", "Shopify"],
+  "/system/users": ["系统管理", "用户管理"],
+  "/system/roles": ["系统管理", "角色权限"],
+  "/system/menus": ["系统管理", "菜单管理"],
+  "/system/settings": ["系统管理", "系统配置"],
 };
 
+function AppLoading() {
+  return (
+    <div className="flex min-h-svh bg-muted/30">
+      <div className="hidden w-64 border-r bg-background p-4 md:block">
+        <Skeleton className="h-12 w-full" />
+        <div className="mt-8 space-y-2">
+          {Array.from({ length: 6 }, (_, index) => <Skeleton className="h-8 w-full" key={index} />)}
+        </div>
+      </div>
+      <div className="flex-1 p-6"><Skeleton className="h-9 w-48" /><Skeleton className="mt-10 h-44 w-full" /></div>
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const navigation = getNavigation(["*"]);
+  const { principal, loading, logout } = useAuth();
+  const pathname = usePathname();
+  const [databaseNavigation, setDatabaseNavigation] = useState<NavigationNode[] | null>(null);
+
+  useEffect(() => {
+    if (!principal) return;
+    let active = true;
+    void api<MenuRecord[]>("/menus/my")
+      .then((items) => { if (active) setDatabaseNavigation(buildNavigationTree(items)); })
+      .catch(() => { if (active) setDatabaseNavigation(null); });
+    return () => { active = false; };
+  }, [principal]);
+
+  const navigation = useMemo(
+    () => databaseNavigation ?? getNavigation(principal?.permissions ?? []),
+    [databaseNavigation, principal?.permissions],
+  );
+  const breadcrumb = routeLabels[pathname] ?? ["控制台", "当前页面"];
+
+  if (loading || !principal) return <AppLoading />;
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 border-r bg-white md:flex md:flex-col">
-        <div className="flex h-20 items-center border-b px-6">
-          <div>
-            <p className="text-[11px] font-semibold tracking-[0.16em] text-primary uppercase">Commerce Ops</p>
-            <p className="mt-1 text-base font-semibold tracking-tight">多店铺运营台</p>
-          </div>
-        </div>
-        <nav aria-label="主导航" className="grid flex-1 content-start gap-1 p-3">
-          {navigation.map((item, index) => {
-            const Icon = icons[item.icon];
-            return (
-              <a
-                className={`group flex items-center gap-3 border px-3 py-2.5 text-sm transition-colors ${index === 0 ? "border-primary bg-primary text-primary-foreground" : "border-transparent hover:border-border hover:bg-muted"}`}
-                href={item.href}
-                key={item.href}
-              >
-                <Icon className="size-4" aria-hidden="true" />
-                <span>{item.label}</span>
-                {item.permission === "rbac:manage" ? (
-                  <ShieldCheck className="ml-auto size-3.5 opacity-60" aria-label="需要管理员权限" />
-                ) : null}
-              </a>
-            );
-          })}
-        </nav>
-        <div className="border-t p-4">
-          <Badge variant="outline" className="mb-3 rounded-none border-primary text-primary">
-            脚手架预览 · OWNER
-          </Badge>
-          <p className="text-xs leading-5 text-muted-foreground">
-            接入钉钉 SSO 后，此处将显示当前员工与组织。
-          </p>
-        </div>
-      </aside>
-
-      <div className="md:pl-64">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-white/95 px-4 backdrop-blur md:px-6">
-          <div className="flex items-center gap-3">
-            <MobileNavigation items={navigation} />
-            <div>
-              <p className="text-sm font-semibold">运营总览</p>
-              <p className="hidden text-xs text-muted-foreground sm:block">连接、资产与审批的统一入口</p>
-            </div>
-          </div>
-          <Button variant="outline" className="rounded-none" disabled>
-            本地开发
-            <ChevronDown data-icon="inline-end" aria-hidden="true" />
-          </Button>
+    <SidebarProvider>
+      <AppSidebar navigation={navigation} pathname={pathname} principal={principal} onLogout={logout} />
+      <SidebarInset className="min-w-0 overflow-hidden">
+        <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-2 border-b bg-background/90 px-4 backdrop-blur supports-backdrop-filter:bg-background/70">
+          <SidebarTrigger className="-ml-1" />
+          <Separator orientation="vertical" className="mr-2 h-4" />
+          <Breadcrumb>
+            <BreadcrumbList>
+              <BreadcrumbItem className="hidden sm:inline-flex">{breadcrumb[0]}</BreadcrumbItem>
+              <BreadcrumbSeparator className="hidden sm:list-item" />
+              <BreadcrumbItem><BreadcrumbPage>{breadcrumb[1]}</BreadcrumbPage></BreadcrumbItem>
+            </BreadcrumbList>
+          </Breadcrumb>
         </header>
-        <StatusRail />
-        <main>{children}</main>
-      </div>
-    </div>
+        <div className="flex flex-1 flex-col p-4 md:p-6 lg:p-8">
+          <div className="mx-auto w-full max-w-[1600px]">{children}</div>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }

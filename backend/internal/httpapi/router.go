@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/xg-management/platform/backend/internal/admin"
 	"github.com/xg-management/platform/backend/internal/auth"
 	"github.com/xg-management/platform/backend/internal/integrations"
 	"github.com/xg-management/platform/backend/internal/rbac"
@@ -13,6 +14,14 @@ import (
 
 type Authenticator interface {
 	Authenticate(*http.Request) (auth.Principal, bool)
+}
+
+type Authorizer interface {
+	Allowed(context.Context, auth.Principal, rbac.Permission) (bool, error)
+}
+
+type PolicyReloader interface {
+	Reload(context.Context) error
 }
 
 type Store struct {
@@ -51,12 +60,19 @@ type ApprovalRepository interface {
 }
 
 type Dependencies struct {
-	Authenticator Authenticator
-	Authorizer    rbac.Authorizer
-	Stores        StoreRepository
-	Assets        AssetRepository
-	Approvals     ApprovalRepository
-	Integrations  []integrations.Status
+	Authenticator   Authenticator
+	Authorizer      Authorizer
+	PolicyReloader  PolicyReloader
+	Stores          StoreRepository
+	Assets          AssetRepository
+	Approvals       ApprovalRepository
+	Integrations    []integrations.Status
+	Admin           admin.Repository
+	Sessions        *auth.SessionManager
+	IntegrationFlow *IntegrationDependencies
+	DevLoginEnabled bool
+	SecureCookies   bool
+	SessionTTL      time.Duration
 }
 
 func NewRouter(dependencies Dependencies) http.Handler {
@@ -70,8 +86,15 @@ func NewRouter(dependencies Dependencies) http.Handler {
 	router.GET("/readyz", func(c *gin.Context) {
 		respondData(c, http.StatusOK, gin.H{"status": "ready", "checked_at": time.Now().UTC()})
 	})
-	router.GET("/api/v1/integrations/dingtalk/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
-	router.GET("/api/v1/integrations/shopify/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	if dependencies.IntegrationFlow != nil {
+		router.POST("/api/v1/auth/dev-login", devLogin(dependencies.Admin, dependencies.Sessions, dependencies.DevLoginEnabled, dependencies.SecureCookies, dependencies.SessionTTL))
+		router.GET("/api/v1/auth/dingtalk/login", dingTalkLogin(*dependencies.IntegrationFlow, false))
+		router.GET("/api/v1/integrations/dingtalk/callback", dingTalkCallback(*dependencies.IntegrationFlow))
+		router.GET("/api/v1/integrations/shopify/callback", shopifyCallback(*dependencies.IntegrationFlow))
+	} else {
+		router.GET("/api/v1/integrations/dingtalk/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
+		router.GET("/api/v1/integrations/shopify/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	}
 	router.POST("/api/v1/webhooks/shopify", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
 
 	api := router.Group("/api/v1")
@@ -80,6 +103,9 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		principal, _ := currentPrincipal(c)
 		respondData(c, http.StatusOK, principal)
 	})
+	if dependencies.Sessions != nil {
+		api.POST("/auth/logout", logout(dependencies.Sessions, dependencies.SecureCookies))
+	}
 	api.GET("/stores", requirePermission(dependencies.Authorizer, rbac.PermissionStoresRead), listStores(dependencies.Stores))
 	api.GET("/assets", requirePermission(dependencies.Authorizer, rbac.PermissionAssetsRead), listAssets(dependencies.Assets))
 	api.GET("/approvals", requirePermission(dependencies.Authorizer, rbac.PermissionApprovalsRead), listApprovals(dependencies.Approvals))
@@ -90,8 +116,45 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		}
 		respondData(c, http.StatusOK, statuses)
 	})
-	api.GET("/integrations/dingtalk/login", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
-	api.GET("/integrations/shopify/install", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	if dependencies.Admin != nil {
+		api.GET("/users", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), listUsers(dependencies.Admin))
+		api.POST("/users", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), createUser(dependencies.Admin))
+		api.PUT("/users/:id", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), updateUser(dependencies.Admin))
+		api.PUT("/users/:id/roles", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), setUserRoles(dependencies.Admin, dependencies.PolicyReloader))
+		api.GET("/roles", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), listRoles(dependencies.Admin))
+		api.POST("/roles", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), createRole(dependencies.Admin))
+		api.PUT("/roles/:id", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), updateRole(dependencies.Admin))
+		api.DELETE("/roles/:id", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), deleteRole(dependencies.Admin, dependencies.PolicyReloader))
+		api.PUT("/roles/:id/permissions", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), setRolePermissions(dependencies.Admin, dependencies.PolicyReloader))
+		api.PUT("/roles/:id/menus", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), setRoleMenus(dependencies.Admin))
+		api.GET("/permissions", requirePermission(dependencies.Authorizer, rbac.PermissionRBACManage), listPermissions(dependencies.Admin))
+		api.GET("/menus/my", listMenus(dependencies.Admin, true))
+		api.GET("/menus", requirePermission(dependencies.Authorizer, rbac.PermissionMenusManage), listMenus(dependencies.Admin, false))
+		api.POST("/menus", requirePermission(dependencies.Authorizer, rbac.PermissionMenusManage), createMenu(dependencies.Admin))
+		api.PUT("/menus/:id", requirePermission(dependencies.Authorizer, rbac.PermissionMenusManage), updateMenu(dependencies.Admin))
+		api.DELETE("/menus/:id", requirePermission(dependencies.Authorizer, rbac.PermissionMenusManage), deleteMenu(dependencies.Admin))
+		api.GET("/settings", requirePermission(dependencies.Authorizer, rbac.PermissionSettingsManage), listSettings(dependencies.Admin))
+		api.PUT("/settings", requirePermission(dependencies.Authorizer, rbac.PermissionSettingsManage), upsertSetting(dependencies.Admin))
+		api.DELETE("/settings/:namespace/:key", requirePermission(dependencies.Authorizer, rbac.PermissionSettingsManage), deleteSetting(dependencies.Admin))
+	}
+	if dependencies.IntegrationFlow != nil {
+		dingTalkGet, dingTalkPut := integrationConfigHandlers(*dependencies.IntegrationFlow, "dingtalk")
+		shopifyGet, shopifyPut := integrationConfigHandlers(*dependencies.IntegrationFlow, "shopify")
+		api.GET("/integrations/dingtalk/config", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsRead), dingTalkGet)
+		api.PUT("/integrations/dingtalk/config", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), dingTalkPut)
+		api.GET("/integrations/dingtalk/users", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsRead), listDingTalkUsers(*dependencies.IntegrationFlow))
+		api.GET("/integrations/dingtalk/login", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), dingTalkLogin(*dependencies.IntegrationFlow, true))
+		api.GET("/integrations/shopify/config", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsRead), shopifyGet)
+		api.PUT("/integrations/shopify/config", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), shopifyPut)
+		api.GET("/integrations/shopify/install", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), shopifyInstall(*dependencies.IntegrationFlow))
+		api.GET("/stores/:id", requirePermission(dependencies.Authorizer, rbac.PermissionStoresRead), getStore(dependencies.Admin))
+		api.PUT("/stores/:id", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), updateStore(dependencies.Admin))
+		api.POST("/stores/:id/disconnect", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), disconnectStore(dependencies.Admin))
+		api.POST("/stores/:id/sync", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), syncStore(*dependencies.IntegrationFlow))
+	} else {
+		api.GET("/integrations/dingtalk/login", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
+		api.GET("/integrations/shopify/install", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	}
 
 	return router
 }

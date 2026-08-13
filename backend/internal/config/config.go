@@ -7,18 +7,20 @@ import (
 )
 
 type Config struct {
-	Environment   string
-	HTTPAddress   string
-	DatabaseURL   string
-	RedisURL      string
-	RabbitMQURL   string
-	RabbitMQQueue string
-	Auth          AuthConfig
-	ObjectStorage ObjectStorageConfig
-	DingTalk      OAuthProviderConfig
-	Shopify       ShopifyConfig
-	MetaAds       OAuthProviderConfig
-	GoogleAds     GoogleAdsConfig
+	Environment             string
+	HTTPAddress             string
+	DatabaseURL             string
+	RedisURL                string
+	RabbitMQURL             string
+	RabbitMQQueue           string
+	Auth                    AuthConfig
+	WebBaseURL              string
+	CredentialEncryptionKey string
+	ObjectStorage           ObjectStorageConfig
+	DingTalk                OAuthProviderConfig
+	Shopify                 ShopifyConfig
+	MetaAds                 OAuthProviderConfig
+	GoogleAds               GoogleAdsConfig
 }
 
 type AuthConfig struct {
@@ -74,6 +76,8 @@ func Load(lookup func(string) string) (Config, error) {
 			DevLoginEnabled: devLoginEnabled,
 			SessionSecret:   lookup("SESSION_SECRET"),
 		},
+		WebBaseURL:              valueOrDefault(lookup("WEB_BASE_URL"), "http://localhost:3001"),
+		CredentialEncryptionKey: valueOrDefault(lookup("CREDENTIAL_ENCRYPTION_KEY"), "0123456789abcdef0123456789abcdef"),
 		ObjectStorage: ObjectStorageConfig{
 			Endpoint:        valueOrDefault(lookup("OBJECT_STORAGE_ENDPOINT"), "http://localhost:9000"),
 			Region:          valueOrDefault(lookup("OBJECT_STORAGE_REGION"), "auto"),
@@ -117,6 +121,9 @@ func Load(lookup func(string) string) (Config, error) {
 		}
 		if len(cfg.Auth.SessionSecret) < 32 {
 			return Config{}, fmt.Errorf("SESSION_SECRET must contain at least 32 characters in production")
+		}
+		if len(cfg.CredentialEncryptionKey) < 32 {
+			return Config{}, fmt.Errorf("CREDENTIAL_ENCRYPTION_KEY must contain an AES-256 key in production")
 		}
 	}
 

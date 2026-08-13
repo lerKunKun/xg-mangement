@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,6 +43,24 @@ func TestProtectedRouteRejectsMissingPermission(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 	assertErrorCode(t, response, "permission_denied")
+}
+
+func TestProtectedRouteReportsAuthorizerFailure(t *testing.T) {
+	principal := auth.Principal{UserID: "user-1", OrganizationID: "org-1"}
+	router := httpapi.NewRouter(httpapi.Dependencies{
+		Authenticator: authenticatorStub{principal: principal, authenticated: true},
+		Authorizer:    authorizerStub{err: errors.New("policy unavailable")},
+		Stores:        &storeRepositoryStub{},
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/stores", nil)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	assertErrorCode(t, response, "internal_error")
 }
 
 func TestStoresRouteUsesAuthenticatedOrganization(t *testing.T) {
@@ -114,7 +133,7 @@ func TestIntegrationEntryPointReportsConfigurationState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			router := httpapi.NewRouter(httpapi.Dependencies{
 				Authenticator: authenticatorStub{principal: principal, authenticated: true},
-				Authorizer:    rbac.Authorizer{},
+				Authorizer:    authorizerStub{},
 				Integrations: []integrations.Status{{
 					Provider:   integrations.ProviderShopify,
 					Configured: tt.configured,
@@ -136,7 +155,7 @@ func TestIntegrationEntryPointReportsConfigurationState(t *testing.T) {
 func newTestRouter(principal auth.Principal, authenticated bool, stores httpapi.StoreRepository) http.Handler {
 	return httpapi.NewRouter(httpapi.Dependencies{
 		Authenticator: authenticatorStub{principal: principal, authenticated: authenticated},
-		Authorizer:    rbac.Authorizer{},
+		Authorizer:    authorizerStub{},
 		Stores:        stores,
 		Assets:        assetRepositoryStub{},
 		Approvals:     approvalRepositoryStub{},
@@ -146,6 +165,20 @@ func newTestRouter(principal auth.Principal, authenticated bool, stores httpapi.
 type authenticatorStub struct {
 	principal     auth.Principal
 	authenticated bool
+}
+
+type authorizerStub struct{ err error }
+
+func (a authorizerStub) Allowed(_ context.Context, principal auth.Principal, required rbac.Permission) (bool, error) {
+	if a.err != nil {
+		return false, a.err
+	}
+	for _, granted := range principal.Permissions {
+		if granted == "*" || granted == string(required) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (a authenticatorStub) Authenticate(*http.Request) (auth.Principal, bool) {

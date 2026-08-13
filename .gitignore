@@ -13,6 +13,7 @@ coverage/
 backend/bin/
 *.test
 *.out
+*.log
 
 # IDE and OS
 .idea/

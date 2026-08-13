@@ -16,16 +16,19 @@ func requestIDMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := c.GetHeader("X-Request-ID")
 		if requestID == "" {
-			var bytes [16]byte
-			if _, err := rand.Read(bytes[:]); err == nil {
-				requestID = hex.EncodeToString(bytes[:])
-			} else {
-				requestID = "unavailable"
-			}
+			requestID = newRequestID()
 		}
 		c.Header("X-Request-ID", requestID)
 		c.Next()
 	}
+}
+
+func newRequestID() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err == nil {
+		return hex.EncodeToString(bytes[:])
+	}
+	return "unavailable"
 }
 
 func authenticate(authenticator Authenticator) gin.HandlerFunc {
@@ -44,10 +47,23 @@ func authenticate(authenticator Authenticator) gin.HandlerFunc {
 	}
 }
 
-func requirePermission(authorizer rbac.Authorizer, permission rbac.Permission) gin.HandlerFunc {
+func requirePermission(authorizer Authorizer, permission rbac.Permission) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		principal, ok := currentPrincipal(c)
-		if !ok || !authorizer.Allowed(principal, permission) {
+		if !ok {
+			respondError(c, http.StatusForbidden, "permission_denied", "You do not have permission to perform this action.")
+			return
+		}
+		if authorizer == nil {
+			internalError(c)
+			return
+		}
+		allowed, err := authorizer.Allowed(c.Request.Context(), principal, permission)
+		if err != nil {
+			internalError(c)
+			return
+		}
+		if !allowed {
 			respondError(c, http.StatusForbidden, "permission_denied", "You do not have permission to perform this action.")
 			return
 		}

@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: xg
       POSTGRES_PASSWORD: xg
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -73,17 +73,17 @@ services:
     restart: "no"
 
   migrate:
-    image: postgres:17-alpine
     profiles: ["tools"]
+    build:
+      context: ./backend
+      target: runtime
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      PGURL: postgres://xg:xg@postgres:5432/xg?sslmode=disable
-    volumes:
-      - ./backend/migrations:/migrations:ro
-    entrypoint: ["psql"]
-    command: ["postgres://xg:xg@postgres:5432/xg?sslmode=disable", "-v", "ON_ERROR_STOP=1", "-f", "/migrations/000001_initial.up.sql"]
+      DATABASE_URL: postgres://xg:xg@postgres:5432/xg?sslmode=disable
+    entrypoint: ["/app/migrate"]
+    command: []
 
   api:
     profiles: ["full"]
@@ -95,6 +95,8 @@ services:
       HTTP_ADDRESS: :8080
       AUTH_DEV_LOGIN_ENABLED: "true"
       SESSION_SECRET: local-development-session-secret-32
+      CREDENTIAL_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
+      WEB_BASE_URL: http://localhost:3000
       DATABASE_URL: postgres://xg:xg@postgres:5432/xg?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://xg:xg@rabbitmq:5672/
@@ -133,7 +135,7 @@ services:
     build:
       context: ./apps/web
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+      API_INTERNAL_URL: http://api:8080
     ports:
       - "3000:3000"
     depends_on:

@@ -14,10 +14,14 @@ import (
 	"github.com/xg-management/platform/backend/internal/config"
 	"github.com/xg-management/platform/backend/internal/httpapi"
 	"github.com/xg-management/platform/backend/internal/integrations"
+	"github.com/xg-management/platform/backend/internal/integrations/dingtalk"
+	"github.com/xg-management/platform/backend/internal/integrations/shopify"
 	"github.com/xg-management/platform/backend/internal/platform/objectstore"
 	"github.com/xg-management/platform/backend/internal/platform/postgres"
+	"github.com/xg-management/platform/backend/internal/platform/queue"
 	rediscache "github.com/xg-management/platform/backend/internal/platform/redis"
 	"github.com/xg-management/platform/backend/internal/rbac"
+	"github.com/xg-management/platform/backend/internal/security"
 )
 
 func main() {
@@ -37,6 +41,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer database.Close()
+	authorizer, err := rbac.NewAuthorizer(startupContext, database)
+	if err != nil {
+		logger.Error("Casbin policy is unavailable", "error", err)
+		os.Exit(1)
+	}
 
 	cache, err := rediscache.Connect(startupContext, cfg.RedisURL)
 	if err != nil {
@@ -44,6 +53,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = cache.Close() }()
+	sessions := auth.NewSessionManager(cache, 12*time.Hour)
+	states := auth.NewOAuthStateManager(cache, 10*time.Minute)
+	cipher, err := security.NewCredentialCipher(cfg.CredentialEncryptionKey)
+	if err != nil {
+		logger.Error("credential encryption configuration is invalid", "error", err)
+		os.Exit(1)
+	}
 
 	storage, err := objectstore.New(startupContext, cfg.ObjectStorage)
 	if err != nil {
@@ -54,14 +70,44 @@ func main() {
 		logger.Error("object storage is unavailable", "error", err)
 		os.Exit(1)
 	}
+	jobQueue, err := queue.Connect(cfg.RabbitMQURL, cfg.RabbitMQQueue)
+	if err != nil {
+		logger.Error("RabbitMQ is unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = jobQueue.Close() }()
 
+	secureCookies := cfg.Environment != "development"
+	integrationFlow := &httpapi.IntegrationDependencies{
+		Repository:     database,
+		Cipher:         cipher,
+		States:         states,
+		Sessions:       sessions,
+		DingTalk:       dingtalk.NewClient(),
+		Shopify:        shopify.NewClient(),
+		Jobs:           jobQueue,
+		WebBaseURL:     cfg.WebBaseURL,
+		SecureCookies:  secureCookies,
+		SessionTTL:     12 * time.Hour,
+		PolicyReloader: authorizer,
+	}
 	router := httpapi.NewRouter(httpapi.Dependencies{
-		Authenticator: auth.DevAuthenticator{Enabled: cfg.Auth.DevLoginEnabled},
-		Authorizer:    rbac.Authorizer{},
-		Stores:        database,
-		Assets:        postgres.NewAssetRepository(database),
-		Approvals:     postgres.NewApprovalRepository(database),
-		Integrations:  integrations.Catalog(cfg),
+		Authenticator: auth.CompositeAuthenticator{
+			auth.SessionAuthenticator{Sessions: sessions, Principals: database},
+			auth.DevAuthenticator{Enabled: cfg.Auth.DevLoginEnabled},
+		},
+		Authorizer:      authorizer,
+		PolicyReloader:  authorizer,
+		Stores:          database,
+		Assets:          postgres.NewAssetRepository(database),
+		Approvals:       postgres.NewApprovalRepository(database),
+		Integrations:    integrations.Catalog(cfg),
+		Admin:           database,
+		Sessions:        sessions,
+		IntegrationFlow: integrationFlow,
+		DevLoginEnabled: cfg.Auth.DevLoginEnabled,
+		SecureCookies:   secureCookies,
+		SessionTTL:      12 * time.Hour,
 	})
 	server := &http.Server{
 		Addr:              cfg.HTTPAddress,

@@ -1,46 +1,35 @@
 package rbac_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/xg-management/platform/backend/internal/auth"
 	"github.com/xg-management/platform/backend/internal/rbac"
 )
 
-func TestAuthorizerAllowed(t *testing.T) {
-	tests := []struct {
-		name        string
-		permissions []string
-		required    rbac.Permission
-		want        bool
-	}{
-		{
-			name:        "owner wildcard can manage access",
-			permissions: []string{"*"},
-			required:    rbac.PermissionRBACManage,
-			want:        true,
-		},
-		{
-			name:        "operator can write stores",
-			permissions: []string{string(rbac.PermissionStoresRead), string(rbac.PermissionStoresWrite)},
-			required:    rbac.PermissionStoresWrite,
-			want:        true,
-		},
-		{
-			name:        "viewer cannot write stores",
-			permissions: []string{string(rbac.PermissionStoresRead)},
-			required:    rbac.PermissionStoresWrite,
-			want:        false,
-		},
+type policyStore struct{ snapshot rbac.PolicySnapshot }
+
+func (s policyStore) LoadRBACPolicy(context.Context) (rbac.PolicySnapshot, error) {
+	return s.snapshot, nil
+}
+
+func TestAuthorizerPublicContractUsesPersistedRoles(t *testing.T) {
+	authorizer, err := rbac.NewAuthorizer(context.Background(), policyStore{snapshot: rbac.PolicySnapshot{
+		Policies:    []rbac.RolePolicy{{RoleID: "operator", OrganizationID: "org-a", Permission: string(rbac.PermissionStoresWrite)}},
+		Assignments: []rbac.UserRole{{UserID: "alice", RoleID: "operator", OrganizationID: "org-a"}},
+	}})
+	if err != nil {
+		t.Fatalf("NewAuthorizer() error = %v", err)
 	}
 
-	authorizer := rbac.Authorizer{}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			principal := auth.Principal{Permissions: tt.permissions}
-			if got := authorizer.Allowed(principal, tt.required); got != tt.want {
-				t.Fatalf("Allowed() = %v, want %v", got, tt.want)
-			}
-		})
+	allowed, err := authorizer.Allowed(context.Background(), auth.Principal{
+		UserID: "alice", OrganizationID: "org-a", Permissions: []string{},
+	}, rbac.PermissionStoresWrite)
+	if err != nil {
+		t.Fatalf("Allowed() error = %v", err)
+	}
+	if !allowed {
+		t.Fatal("Allowed() = false, want persisted Casbin policy to grant access")
 	}
 }

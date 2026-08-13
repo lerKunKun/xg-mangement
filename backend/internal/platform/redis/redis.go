@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"time"
 
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -30,4 +31,20 @@ func (c *Client) Ping(ctx context.Context) error {
 
 func (c *Client) Close() error {
 	return c.client.Close()
+}
+
+func (c *Client) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	return c.client.Set(ctx, key, value, ttl).Err()
+}
+
+func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
+	return c.client.Get(ctx, key).Bytes()
+}
+
+func (c *Client) GetDelete(ctx context.Context, key string) ([]byte, error) {
+	return c.client.GetDel(ctx, key).Bytes()
+}
+
+func (c *Client) Delete(ctx context.Context, key string) error {
+	return c.client.Del(ctx, key).Err()
 }
