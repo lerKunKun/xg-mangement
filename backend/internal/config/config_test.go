@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xg-management/platform/backend/internal/config"
 )
@@ -17,6 +18,28 @@ func TestLoadRejectsDevelopmentLoginInProduction(t *testing.T) {
 	_, err := config.Load(lookup)
 	if err == nil || !strings.Contains(err.Error(), "development login") {
 		t.Fatalf("Load() error = %v, want development login safety error", err)
+	}
+}
+
+func TestLoadShopifySyncRuntimeConfiguration(t *testing.T) {
+	cfg, err := config.Load(envLookup(map[string]string{
+		"SHOPIFY_SYNC_POLL_INTERVAL": "2s",
+		"SHOPIFY_SYNC_TIMEOUT":       "10m",
+		"SHOPIFY_SYNC_MAX_ATTEMPTS":  "4",
+		"RABBITMQ_RETRY_DELAY":       "45s",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ShopifySync.PollInterval != 2*time.Second || cfg.ShopifySync.Timeout != 10*time.Minute || cfg.ShopifySync.MaxAttempts != 4 || cfg.RabbitMQRetryDelay != 45*time.Second {
+		t.Fatalf("runtime config = %#v, retry = %v", cfg.ShopifySync, cfg.RabbitMQRetryDelay)
+	}
+}
+
+func TestLoadRejectsNonPositiveShopifyAttempts(t *testing.T) {
+	_, err := config.Load(envLookup(map[string]string{"SHOPIFY_SYNC_MAX_ATTEMPTS": "0"}))
+	if err == nil || !strings.Contains(err.Error(), "SHOPIFY_SYNC_MAX_ATTEMPTS") {
+		t.Fatalf("Load() error = %v", err)
 	}
 }
 

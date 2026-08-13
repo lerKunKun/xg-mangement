@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -13,12 +14,14 @@ type Config struct {
 	RedisURL                string
 	RabbitMQURL             string
 	RabbitMQQueue           string
+	RabbitMQRetryDelay      time.Duration
 	Auth                    AuthConfig
 	WebBaseURL              string
 	CredentialEncryptionKey string
 	ObjectStorage           ObjectStorageConfig
 	DingTalk                OAuthProviderConfig
 	Shopify                 ShopifyConfig
+	ShopifySync             ShopifySyncConfig
 	MetaAds                 OAuthProviderConfig
 	GoogleAds               GoogleAdsConfig
 }
@@ -49,6 +52,12 @@ type ShopifyConfig struct {
 	Scopes     string
 }
 
+type ShopifySyncConfig struct {
+	PollInterval time.Duration
+	Timeout      time.Duration
+	MaxAttempts  int
+}
+
 type GoogleAdsConfig struct {
 	OAuthProviderConfig
 	DeveloperToken string
@@ -64,14 +73,31 @@ func Load(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse OBJECT_STORAGE_PATH_STYLE: %w", err)
 	}
+	retryDelay, err := positiveDuration(lookup, "RABBITMQ_RETRY_DELAY", "30s")
+	if err != nil {
+		return Config{}, err
+	}
+	pollInterval, err := positiveDuration(lookup, "SHOPIFY_SYNC_POLL_INTERVAL", "5s")
+	if err != nil {
+		return Config{}, err
+	}
+	syncTimeout, err := positiveDuration(lookup, "SHOPIFY_SYNC_TIMEOUT", "15m")
+	if err != nil {
+		return Config{}, err
+	}
+	maxAttempts, err := positiveInt(lookup, "SHOPIFY_SYNC_MAX_ATTEMPTS", "5")
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
-		Environment:   environment,
-		HTTPAddress:   valueOrDefault(lookup("HTTP_ADDRESS"), ":8080"),
-		DatabaseURL:   valueOrDefault(lookup("DATABASE_URL"), "postgres://xg:xg@localhost:5432/xg?sslmode=disable"),
-		RedisURL:      valueOrDefault(lookup("REDIS_URL"), "redis://localhost:6379/0"),
-		RabbitMQURL:   valueOrDefault(lookup("RABBITMQ_URL"), "amqp://xg:xg@localhost:5672/"),
-		RabbitMQQueue: valueOrDefault(lookup("RABBITMQ_QUEUE"), "xg.jobs"),
+		Environment:        environment,
+		HTTPAddress:        valueOrDefault(lookup("HTTP_ADDRESS"), ":8080"),
+		DatabaseURL:        valueOrDefault(lookup("DATABASE_URL"), "postgres://xg:xg@localhost:5432/xg?sslmode=disable"),
+		RedisURL:           valueOrDefault(lookup("REDIS_URL"), "redis://localhost:6379/0"),
+		RabbitMQURL:        valueOrDefault(lookup("RABBITMQ_URL"), "amqp://xg:xg@localhost:5672/"),
+		RabbitMQQueue:      valueOrDefault(lookup("RABBITMQ_QUEUE"), "xg.jobs"),
+		RabbitMQRetryDelay: retryDelay,
 		Auth: AuthConfig{
 			DevLoginEnabled: devLoginEnabled,
 			SessionSecret:   lookup("SESSION_SECRET"),
@@ -100,6 +126,7 @@ func Load(lookup func(string) string) (Config, error) {
 			APIVersion: valueOrDefault(lookup("SHOPIFY_API_VERSION"), "2026-07"),
 			Scopes:     valueOrDefault(lookup("SHOPIFY_SCOPES"), "read_products,write_products,read_orders"),
 		},
+		ShopifySync: ShopifySyncConfig{PollInterval: pollInterval, Timeout: syncTimeout, MaxAttempts: maxAttempts},
 		MetaAds: OAuthProviderConfig{
 			ClientID:     lookup("META_APP_ID"),
 			ClientSecret: lookup("META_APP_SECRET"),
@@ -128,6 +155,22 @@ func Load(lookup func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func positiveDuration(lookup func(string) string, key, fallback string) (time.Duration, error) {
+	value, err := time.ParseDuration(valueOrDefault(lookup(key), fallback))
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("parse %s: value must be a positive duration", key)
+	}
+	return value, nil
+}
+
+func positiveInt(lookup func(string) string, key, fallback string) (int, error) {
+	value, err := strconv.Atoi(valueOrDefault(lookup(key), fallback))
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("parse %s: value must be a positive integer", key)
+	}
+	return value, nil
 }
 
 func valueOrDefault(value, fallback string) string {
