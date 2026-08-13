@@ -24,3 +24,11 @@ func TestDecodeOutboxEnvelope(t *testing.T) {
 		t.Fatalf("envelope = %#v, error = %v", envelope, err)
 	}
 }
+
+func TestWebhookSyncModeUsesFullReconciliation(t *testing.T) {
+	for _, topic := range []string{"products/update", "products/delete", "collections/delete", "themes/publish"} {
+		if got := webhookSyncMode(topic); got != "full" {
+			t.Fatalf("topic %s mode = %q, want full", topic, got)
+		}
+	}
+}

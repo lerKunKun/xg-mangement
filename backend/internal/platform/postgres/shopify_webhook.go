@@ -83,16 +83,16 @@ func enqueueWebhookSync(ctx context.Context, tx pgx.Tx, event httpapi.ShopifyWeb
 	var runID string
 	err := tx.QueryRow(ctx, `
 		INSERT INTO shopify_sync_runs(organization_id,store_id,mode,status,job_id)
-		SELECT $1,$2,'incremental','queued',$3
+		SELECT $1,$2,$4,'queued',$3
 		WHERE NOT EXISTS(SELECT 1 FROM shopify_sync_runs WHERE organization_id=$1 AND store_id=$2 AND status IN ('queued','running'))
-		RETURNING id::text`, event.OrganizationID, event.StoreID, jobID).Scan(&runID)
+		RETURNING id::text`, event.OrganizationID, event.StoreID, jobID, webhookSyncMode(event.Topic)).Scan(&runID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("create webhook Shopify sync run: %w", err)
 	}
-	payload, err := json.Marshal(map[string]string{"store_id": event.StoreID, "run_id": runID, "mode": "incremental"})
+	payload, err := json.Marshal(map[string]string{"store_id": event.StoreID, "run_id": runID, "mode": webhookSyncMode(event.Topic)})
 	if err != nil {
 		return fmt.Errorf("encode webhook sync payload: %w", err)
 	}
@@ -106,6 +106,11 @@ func enqueueWebhookSync(ctx context.Context, tx pgx.Tx, event httpapi.ShopifyWeb
 	}
 	return nil
 }
+
+// Webhooks currently schedule a full reconciliation because the Bulk queries
+// return complete collections. This keeps delete events correct until a truly
+// targeted incremental query and explicit deletion set are implemented.
+func webhookSyncMode(string) string { return "full" }
 
 func topicTriggersMirror(topic string) bool {
 	switch topic {
