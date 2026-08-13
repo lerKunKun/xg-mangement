@@ -26,6 +26,7 @@ const (
 	PermissionRBACManage         Permission = "rbac:manage"
 	PermissionSettingsManage     Permission = "settings:manage"
 	PermissionMenusManage        Permission = "menus:manage"
+	PermissionShopifySync        Permission = "shopify:sync"
 )
 
 type RolePolicy struct {

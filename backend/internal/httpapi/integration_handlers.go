@@ -68,6 +68,10 @@ type shopifySecrets struct {
 	ClientSecret string `json:"client_secret"`
 }
 
+const shopifyAdminAPIVersion = "2026-07"
+
+var requiredShopifyScopes = []string{"read_products", "read_themes"}
+
 func integrationConfigHandlers(deps IntegrationDependencies, provider string) (gin.HandlerFunc, gin.HandlerFunc) {
 	get := func(c *gin.Context) {
 		principal, _ := currentPrincipal(c)
@@ -76,7 +80,16 @@ func integrationConfigHandlers(deps IntegrationDependencies, provider string) (g
 			internalError(c)
 			return
 		}
-		respondData(c, http.StatusOK, gin.H{"provider": provider, "public_config": item.PublicConfig, "enabled": item.Enabled, "secret_configured": len(item.EncryptedSecrets) > 0, "updated_at": item.UpdatedAt})
+		publicConfig := item.PublicConfig
+		if provider == "shopify" {
+			var public shopifyPublicConfig
+			if json.Unmarshal(publicConfig, &public) == nil {
+				public.APIVersion = shopifyAdminAPIVersion
+				public.Scopes = normalizeScopes(public.Scopes)
+				publicConfig, _ = json.Marshal(public)
+			}
+		}
+		respondData(c, http.StatusOK, gin.H{"provider": provider, "public_config": publicConfig, "enabled": item.Enabled, "secret_configured": len(item.EncryptedSecrets) > 0, "updated_at": item.UpdatedAt})
 	}
 	put := func(c *gin.Context) {
 		var input struct {
@@ -87,6 +100,22 @@ func integrationConfigHandlers(deps IntegrationDependencies, provider string) (g
 		if !bindJSON(c, &input) || !json.Valid(input.PublicConfig) {
 			invalidInput(c, "public_config must be valid JSON")
 			return
+		}
+		if provider == "shopify" {
+			var public shopifyPublicConfig
+			if err := json.Unmarshal(input.PublicConfig, &public); err != nil {
+				invalidInput(c, "Shopify public_config is invalid")
+				return
+			}
+			public.ClientID = strings.TrimSpace(public.ClientID)
+			public.RedirectURI = strings.TrimSpace(public.RedirectURI)
+			public.Scopes = phaseOneShopifyScopes()
+			public.APIVersion = shopifyAdminAPIVersion
+			if public.ClientID == "" || public.RedirectURI == "" {
+				invalidInput(c, "Shopify client_id and redirect_uri are required")
+				return
+			}
+			input.PublicConfig, _ = json.Marshal(public)
 		}
 		principal, _ := currentPrincipal(c)
 		var encrypted []byte
@@ -399,11 +428,47 @@ func loadShopifyConfig(c context.Context, deps IntegrationDependencies, organiza
 	if json.Unmarshal(item.PublicConfig, &public) != nil {
 		return public, secret, errors.New("invalid config")
 	}
+	public.APIVersion = shopifyAdminAPIVersion
+	public.Scopes = normalizeScopes(public.Scopes)
+	if !sameScopes(public.Scopes, requiredShopifyScopes) {
+		return public, secret, errors.New("Shopify authorization must be updated to the Phase 1 read-only scopes")
+	}
+	public.Scopes = phaseOneShopifyScopes()
 	plain, err := deps.Cipher.Decrypt(item.EncryptedSecrets)
 	if err != nil || json.Unmarshal(plain, &secret) != nil || secret.ClientSecret == "" {
 		return public, secret, errors.New("invalid secret")
 	}
 	return public, secret, nil
+}
+func normalizeScopes(scopes []string) []string {
+	seen := make(map[string]bool, len(scopes))
+	result := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope != "" && !seen[scope] {
+			seen[scope] = true
+			result = append(result, scope)
+		}
+	}
+	return result
+}
+func phaseOneShopifyScopes() []string {
+	return append([]string(nil), requiredShopifyScopes...)
+}
+func scopeListContains(granted, required []string) bool {
+	values := make(map[string]bool, len(granted))
+	for _, scope := range granted {
+		values[scope] = true
+	}
+	for _, scope := range required {
+		if !values[scope] {
+			return false
+		}
+	}
+	return true
+}
+func sameScopes(granted, required []string) bool {
+	return len(normalizeScopes(granted)) == len(normalizeScopes(required)) && scopeListContains(granted, required)
 }
 func scopesContain(granted string, required []string) bool {
 	values := map[string]bool{}

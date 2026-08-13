@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { ExternalLink, Plus, RefreshCw, Store as StoreIcon, Unplug } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAuth } from "@/components/auth-provider";
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -11,9 +13,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { api, type StoreRecord } from "@/lib/api";
+import { api, can, type StoreRecord } from "@/lib/api";
 
 export default function StoresPage() {
+  const { principal } = useAuth();
   const [stores, setStores] = useState<StoreRecord[]>([]);
   const [shop, setShop] = useState("");
   const [error, setError] = useState("");
@@ -37,7 +40,7 @@ export default function StoresPage() {
   };
   const sync = async (id: string) => {
     try {
-      await api(`/stores/${id}/sync`, { method: "POST" });
+      await api(`/stores/${id}/sync-runs`, { method: "POST", body: JSON.stringify({ mode: "full" }) });
       toast.success("同步任务已进入队列");
     } catch (requestError) {
       toast.error(requestError instanceof Error ? requestError.message : "任务入队失败");
@@ -66,8 +69,9 @@ export default function StoresPage() {
                   <TableCell><Badge variant={store.status === "connected" ? "default" : "outline"}>{store.status}</Badge></TableCell>
                   <TableCell>{store.last_sync ? new Date(store.last_sync).toLocaleString() : "尚未同步"}</TableCell>
                   <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" nativeButton={false} render={<Link href={`/stores/${store.id}`} />}>详情</Button>
                     <Button variant="ghost" size="sm" nativeButton={false} render={<a href={`https://${store.domain}`} target="_blank" rel="noreferrer" />}><ExternalLink />访问</Button>
-                    <Button variant="ghost" size="sm" onClick={() => void sync(store.id)} disabled={store.status !== "connected"}><RefreshCw />同步</Button>
+                    {can(principal, "shopify:sync") ? <Button variant="ghost" size="sm" onClick={() => void sync(store.id)} disabled={store.status !== "connected"}><RefreshCw />同步</Button> : null}
                     <Button variant="ghost" size="sm" onClick={() => void disconnect(store.id)}><Unplug />断开</Button>
                   </TableCell>
                 </TableRow>
