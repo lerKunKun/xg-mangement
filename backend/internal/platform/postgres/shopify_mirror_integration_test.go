@@ -122,6 +122,44 @@ func TestShopifyStoreDomainIsGloballyCaseInsensitiveUnique(t *testing.T) {
 	}
 }
 
+func TestPendingShopifyStoreIsListedBeforeOAuthCompletes(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_TEST_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_TEST_URL is not set")
+	}
+	ctx := context.Background()
+	client, err := Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	domain := "codex-pending-" + time.Now().UTC().Format("20060102150405.000000000") + ".myshopify.com"
+
+	store, err := client.EnsurePendingShopifyStore(ctx, localTestOrganizationID, domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupIntegrationSyncStore(ctx, client, store.ID)
+	if store.Domain != domain || store.Status != "pending" {
+		t.Fatalf("pending store = %#v", store)
+	}
+
+	stores, err := client.List(ctx, localTestOrganizationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range stores {
+		if item.ID == store.ID && item.Domain == domain && item.Status == "pending" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pending store %s was not returned by List", store.ID)
+	}
+}
+
 func createIntegrationSyncRun(t *testing.T, client *Client, suffix string) (string, string) {
 	t.Helper()
 	ctx := context.Background()

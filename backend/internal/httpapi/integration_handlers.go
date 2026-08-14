@@ -49,11 +49,12 @@ type IntegrationDependencies struct {
 }
 
 type dingTalkPublicConfig struct {
-	ClientID         string   `json:"client_id"`
-	RedirectURI      string   `json:"redirect_uri"`
-	Scopes           []string `json:"scopes"`
-	OrganizationSlug string   `json:"organization_slug"`
-	CorpID           string   `json:"corp_id"`
+	ClientID            string   `json:"client_id"`
+	RedirectURI         string   `json:"redirect_uri"`
+	Scopes              []string `json:"scopes"`
+	CorpID              string   `json:"corp_id"`
+	AgentID             string   `json:"agent_id,omitempty"`
+	ApprovalProcessCode string   `json:"approval_process_code,omitempty"`
 }
 type dingTalkSecrets struct {
 	ClientSecret string `json:"client_secret"`
@@ -71,6 +72,29 @@ type shopifySecrets struct {
 const shopifyAdminAPIVersion = "2026-07"
 
 var requiredShopifyScopes = []string{"read_products", "read_themes"}
+var requiredDingTalkScopes = []string{"openid", "corpid"}
+
+func normalizeShopifyPublicConfig(public shopifyPublicConfig, webBaseURL string) shopifyPublicConfig {
+	public.ClientID = strings.TrimSpace(public.ClientID)
+	public.RedirectURI = canonicalIntegrationCallbackURL(webBaseURL, "shopify")
+	public.Scopes = phaseOneShopifyScopes()
+	public.APIVersion = shopifyAdminAPIVersion
+	return public
+}
+
+func normalizeDingTalkPublicConfig(public dingTalkPublicConfig, webBaseURL string) dingTalkPublicConfig {
+	public.ClientID = strings.TrimSpace(public.ClientID)
+	public.CorpID = strings.TrimSpace(public.CorpID)
+	public.AgentID = strings.TrimSpace(public.AgentID)
+	public.ApprovalProcessCode = strings.TrimSpace(public.ApprovalProcessCode)
+	public.RedirectURI = canonicalIntegrationCallbackURL(webBaseURL, "dingtalk")
+	public.Scopes = append([]string(nil), requiredDingTalkScopes...)
+	return public
+}
+
+func canonicalIntegrationCallbackURL(webBaseURL, provider string) string {
+	return strings.TrimRight(strings.TrimSpace(webBaseURL), "/") + "/backend/integrations/" + provider + "/callback"
+}
 
 func integrationConfigHandlers(deps IntegrationDependencies, provider string) (gin.HandlerFunc, gin.HandlerFunc) {
 	get := func(c *gin.Context) {
@@ -84,8 +108,13 @@ func integrationConfigHandlers(deps IntegrationDependencies, provider string) (g
 		if provider == "shopify" {
 			var public shopifyPublicConfig
 			if json.Unmarshal(publicConfig, &public) == nil {
-				public.APIVersion = shopifyAdminAPIVersion
-				public.Scopes = normalizeScopes(public.Scopes)
+				public = normalizeShopifyPublicConfig(public, deps.WebBaseURL)
+				publicConfig, _ = json.Marshal(public)
+			}
+		} else if provider == "dingtalk" {
+			var public dingTalkPublicConfig
+			if json.Unmarshal(publicConfig, &public) == nil {
+				public = normalizeDingTalkPublicConfig(public, deps.WebBaseURL)
 				publicConfig, _ = json.Marshal(public)
 			}
 		}
@@ -107,17 +136,35 @@ func integrationConfigHandlers(deps IntegrationDependencies, provider string) (g
 				invalidInput(c, "Shopify public_config is invalid")
 				return
 			}
-			public.ClientID = strings.TrimSpace(public.ClientID)
-			public.RedirectURI = strings.TrimSpace(public.RedirectURI)
-			public.Scopes = phaseOneShopifyScopes()
-			public.APIVersion = shopifyAdminAPIVersion
-			if public.ClientID == "" || public.RedirectURI == "" {
-				invalidInput(c, "Shopify client_id and redirect_uri are required")
+			public = normalizeShopifyPublicConfig(public, deps.WebBaseURL)
+			if public.ClientID == "" {
+				invalidInput(c, "Shopify client_id is required")
+				return
+			}
+			input.PublicConfig, _ = json.Marshal(public)
+		} else if provider == "dingtalk" {
+			var public dingTalkPublicConfig
+			if err := json.Unmarshal(input.PublicConfig, &public); err != nil {
+				invalidInput(c, "DingTalk public_config is invalid")
+				return
+			}
+			public = normalizeDingTalkPublicConfig(public, deps.WebBaseURL)
+			if input.Enabled && (public.ClientID == "" || public.CorpID == "") {
+				invalidInput(c, "DingTalk client_id and corp_id are required when enabling the integration")
 				return
 			}
 			input.PublicConfig, _ = json.Marshal(public)
 		}
 		principal, _ := currentPrincipal(c)
+		current, err := deps.Repository.GetIntegrationConfig(c, principal.OrganizationID, provider)
+		if err != nil {
+			internalError(c)
+			return
+		}
+		if input.Enabled && strings.TrimSpace(input.ClientSecret) == "" && len(current.EncryptedSecrets) == 0 {
+			invalidInput(c, "client_secret is required when enabling the integration")
+			return
+		}
 		var encrypted []byte
 		if input.ClientSecret != "" {
 			payload, _ := json.Marshal(map[string]string{"client_secret": input.ClientSecret})
@@ -253,6 +300,10 @@ func shopifyInstall(deps IntegrationDependencies) gin.HandlerFunc {
 		cfg, secret, err := loadShopifyConfig(c, deps, principal.OrganizationID)
 		if err != nil {
 			integrationNotConfigured(c)
+			return
+		}
+		if _, err := deps.Repository.EnsurePendingShopifyStore(c, principal.OrganizationID, domain); err != nil {
+			internalError(c)
 			return
 		}
 		state, err := deps.States.Create(c, auth.OAuthState{Provider: "shopify", OrganizationID: principal.OrganizationID, UserID: principal.UserID, Subject: domain, ReturnTo: "/stores"})
@@ -412,6 +463,10 @@ func loadDingTalkConfig(c context.Context, deps IntegrationDependencies, organiz
 	if json.Unmarshal(item.PublicConfig, &public) != nil {
 		return public, secret, errors.New("invalid config")
 	}
+	public = normalizeDingTalkPublicConfig(public, deps.WebBaseURL)
+	if public.ClientID == "" || public.CorpID == "" {
+		return public, secret, errors.New("invalid config")
+	}
 	plain, err := deps.Cipher.Decrypt(item.EncryptedSecrets)
 	if err != nil || json.Unmarshal(plain, &secret) != nil || secret.ClientSecret == "" {
 		return public, secret, errors.New("invalid secret")
@@ -428,12 +483,13 @@ func loadShopifyConfig(c context.Context, deps IntegrationDependencies, organiza
 	if json.Unmarshal(item.PublicConfig, &public) != nil {
 		return public, secret, errors.New("invalid config")
 	}
-	public.APIVersion = shopifyAdminAPIVersion
-	public.Scopes = normalizeScopes(public.Scopes)
 	if !sameScopes(public.Scopes, requiredShopifyScopes) {
 		return public, secret, errors.New("Shopify authorization must be updated to the Phase 1 read-only scopes")
 	}
-	public.Scopes = phaseOneShopifyScopes()
+	public = normalizeShopifyPublicConfig(public, deps.WebBaseURL)
+	if public.ClientID == "" {
+		return public, secret, errors.New("invalid config")
+	}
 	plain, err := deps.Cipher.Decrypt(item.EncryptedSecrets)
 	if err != nil || json.Unmarshal(plain, &secret) != nil || secret.ClientSecret == "" {
 		return public, secret, errors.New("invalid secret")

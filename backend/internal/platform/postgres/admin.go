@@ -430,6 +430,18 @@ func (c *Client) DisconnectStore(ctx context.Context, organizationID, storeID st
 	})
 }
 
+func (c *Client) EnsurePendingShopifyStore(ctx context.Context, organizationID, domain string) (admin.StoreDetails, error) {
+	var storeID string
+	err := c.pool.QueryRow(ctx, `INSERT INTO shopify_stores(organization_id,name,shop_domain,status)
+		VALUES($1,$2,$2,'pending') ON CONFLICT(organization_id,shop_domain) DO UPDATE SET
+		status=CASE WHEN shopify_stores.status='connected' THEN shopify_stores.status ELSE 'pending' END,updated_at=now()
+		RETURNING id::text`, organizationID, domain).Scan(&storeID)
+	if err != nil {
+		return admin.StoreDetails{}, err
+	}
+	return c.GetStore(ctx, organizationID, storeID)
+}
+
 func (c *Client) UpsertShopifyAuthorization(ctx context.Context, input admin.ShopifyAuthorization) (admin.StoreDetails, error) {
 	var storeID string
 	err := c.withTransaction(ctx, func(tx pgx.Tx) error {
