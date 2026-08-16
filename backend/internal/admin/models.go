@@ -146,5 +146,6 @@ type Repository interface {
 	GetStore(context.Context, string, string) (StoreDetails, error)
 	UpdateStore(context.Context, string, string, string, string) (StoreDetails, error)
 	DisconnectStore(context.Context, string, string) error
+	EnsurePendingShopifyStore(context.Context, string, string) (StoreDetails, error)
 	UpsertShopifyAuthorization(context.Context, ShopifyAuthorization) (StoreDetails, error)
 }

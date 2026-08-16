@@ -56,6 +56,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     [databaseNavigation, principal?.permissions],
   );
   const breadcrumb = routeLabels[pathname] ?? ["控制台", "当前页面"];
+  const resolvedBreadcrumb = pathname.startsWith("/stores/") ? ["店铺资产", "店铺详情"] : breadcrumb;
 
   if (loading || !principal) return <AppLoading />;
 
@@ -68,9 +69,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Separator orientation="vertical" className="mr-2 h-4" />
           <Breadcrumb>
             <BreadcrumbList>
-              <BreadcrumbItem className="hidden sm:inline-flex">{breadcrumb[0]}</BreadcrumbItem>
+              <BreadcrumbItem className="hidden sm:inline-flex">{resolvedBreadcrumb[0]}</BreadcrumbItem>
               <BreadcrumbSeparator className="hidden sm:list-item" />
-              <BreadcrumbItem><BreadcrumbPage>{breadcrumb[1]}</BreadcrumbPage></BreadcrumbItem>
+              <BreadcrumbItem><BreadcrumbPage>{resolvedBreadcrumb[1]}</BreadcrumbPage></BreadcrumbItem>
             </BreadcrumbList>
           </Breadcrumb>
         </header>

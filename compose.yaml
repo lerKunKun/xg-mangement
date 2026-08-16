@@ -124,9 +124,17 @@ services:
     command: ["/app/worker"]
     environment:
       APP_ENV: development
+      DATABASE_URL: postgres://xg:xg@postgres:5432/xg?sslmode=disable
+      CREDENTIAL_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef
       RABBITMQ_URL: amqp://xg:xg@rabbitmq:5672/
       RABBITMQ_QUEUE: xg.jobs
+      RABBITMQ_RETRY_DELAY: 30s
+      SHOPIFY_SYNC_POLL_INTERVAL: 5s
+      SHOPIFY_SYNC_TIMEOUT: 15m
+      SHOPIFY_SYNC_MAX_ATTEMPTS: "5"
     depends_on:
+      postgres:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
 

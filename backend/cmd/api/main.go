@@ -70,11 +70,10 @@ func main() {
 		logger.Error("object storage is unavailable", "error", err)
 		os.Exit(1)
 	}
-	jobQueue, err := queue.Connect(cfg.RabbitMQURL, cfg.RabbitMQQueue)
-	if err != nil {
-		logger.Error("RabbitMQ is unavailable", "error", err)
-		os.Exit(1)
-	}
+	// Outbox rows are durable in PostgreSQL. The publisher connects lazily and
+	// drops failed connections so the next outbox pass can reconnect without
+	// making transient RabbitMQ outages take down the API.
+	jobQueue := queue.NewLazyPublisher(cfg.RabbitMQURL, cfg.RabbitMQQueue, cfg.RabbitMQRetryDelay, cfg.ShopifySync.MaxAttempts)
 	defer func() { _ = jobQueue.Close() }()
 
 	secureCookies := cfg.Environment != "development"
@@ -91,6 +90,7 @@ func main() {
 		SessionTTL:     12 * time.Hour,
 		PolicyReloader: authorizer,
 	}
+	webhooks := &httpapi.ShopifyWebhookDependencies{Repository: database, Cipher: cipher}
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Authenticator: auth.CompositeAuthenticator{
 			auth.SessionAuthenticator{Sessions: sessions, Principals: database},
@@ -105,10 +105,15 @@ func main() {
 		Admin:           database,
 		Sessions:        sessions,
 		IntegrationFlow: integrationFlow,
+		Webhooks:        webhooks,
+		ShopifySync:     database,
 		DevLoginEnabled: cfg.Auth.DevLoginEnabled,
 		SecureCookies:   secureCookies,
 		SessionTTL:      12 * time.Hour,
 	})
+	outboxContext, stopOutbox := context.WithCancel(context.Background())
+	defer stopOutbox()
+	go publishOutbox(outboxContext, logger, database, jobQueue)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddress,
 		Handler:           router,
@@ -139,5 +144,26 @@ func main() {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownContext); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+	}
+}
+
+type outboxStore interface {
+	PublishOutboxBatch(context.Context, postgres.OutboxJobPublisher, int) (int, error)
+}
+
+func publishOutbox(ctx context.Context, logger *slog.Logger, store outboxStore, publisher postgres.OutboxJobPublisher) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if count, err := store.PublishOutboxBatch(ctx, publisher, 50); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("outbox publish batch failed", "error", err)
+		} else if count > 0 {
+			logger.Info("outbox messages published", "count", count)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }

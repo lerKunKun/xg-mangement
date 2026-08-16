@@ -73,6 +73,8 @@ type Dependencies struct {
 	DevLoginEnabled bool
 	SecureCookies   bool
 	SessionTTL      time.Duration
+	Webhooks        *ShopifyWebhookDependencies
+	ShopifySync     ShopifySyncRepository
 }
 
 func NewRouter(dependencies Dependencies) http.Handler {
@@ -95,7 +97,11 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		router.GET("/api/v1/integrations/dingtalk/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
 		router.GET("/api/v1/integrations/shopify/callback", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
 	}
-	router.POST("/api/v1/webhooks/shopify", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	if dependencies.Webhooks != nil {
+		router.POST("/api/v1/webhooks/shopify", shopifyWebhook(*dependencies.Webhooks))
+	} else {
+		router.POST("/api/v1/webhooks/shopify", integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))
+	}
 
 	api := router.Group("/api/v1")
 	api.Use(authenticate(dependencies.Authenticator))
@@ -107,6 +113,11 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		api.POST("/auth/logout", logout(dependencies.Sessions, dependencies.SecureCookies))
 	}
 	api.GET("/stores", requirePermission(dependencies.Authorizer, rbac.PermissionStoresRead), listStores(dependencies.Stores))
+	if dependencies.ShopifySync != nil {
+		api.POST("/stores/:id/sync-runs", requirePermission(dependencies.Authorizer, rbac.PermissionShopifySync), createShopifySyncRun(dependencies.ShopifySync))
+		api.GET("/stores/:id/sync-runs", requirePermission(dependencies.Authorizer, rbac.PermissionStoresRead), listShopifySyncRuns(dependencies.ShopifySync))
+		api.GET("/stores/:id/themes", requirePermission(dependencies.Authorizer, rbac.PermissionStoresRead), listShopifyThemes(dependencies.ShopifySync))
+	}
 	api.GET("/assets", requirePermission(dependencies.Authorizer, rbac.PermissionAssetsRead), listAssets(dependencies.Assets))
 	api.GET("/approvals", requirePermission(dependencies.Authorizer, rbac.PermissionApprovalsRead), listApprovals(dependencies.Approvals))
 	api.GET("/integrations", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsRead), func(c *gin.Context) {
@@ -150,7 +161,9 @@ func NewRouter(dependencies Dependencies) http.Handler {
 		api.GET("/stores/:id", requirePermission(dependencies.Authorizer, rbac.PermissionStoresRead), getStore(dependencies.Admin))
 		api.PUT("/stores/:id", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), updateStore(dependencies.Admin))
 		api.POST("/stores/:id/disconnect", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), disconnectStore(dependencies.Admin))
-		api.POST("/stores/:id/sync", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), syncStore(*dependencies.IntegrationFlow))
+		if dependencies.ShopifySync == nil {
+			api.POST("/stores/:id/sync", requirePermission(dependencies.Authorizer, rbac.PermissionStoresWrite), syncStore(*dependencies.IntegrationFlow))
+		}
 	} else {
 		api.GET("/integrations/dingtalk/login", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), integrationBoundary(dependencies.Integrations, integrations.ProviderDingTalk))
 		api.GET("/integrations/shopify/install", requirePermission(dependencies.Authorizer, rbac.PermissionIntegrationsManage), integrationBoundary(dependencies.Integrations, integrations.ProviderShopify))

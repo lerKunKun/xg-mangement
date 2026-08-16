@@ -12,12 +12,20 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api, type IntegrationConfig } from "@/lib/api";
 
-type Field = { key: string; label: string; placeholder?: string };
+type Field = {
+  key: string;
+  label: string;
+  placeholder?: string;
+  description?: string;
+  readOnly?: boolean;
+  wide?: boolean;
+};
 
-export function IntegrationConfigForm({ provider, fields, defaults }: {
+export function IntegrationConfigForm({ provider, fields, defaults, secretLabel = "Client Secret" }: {
   provider: "dingtalk" | "shopify";
   fields: Field[];
   defaults: Record<string, string>;
+  secretLabel?: string;
 }) {
   const defaultsRef = useRef(defaults);
   const [values, setValues] = useState(defaults);
@@ -78,19 +86,21 @@ export function IntegrationConfigForm({ provider, fields, defaults }: {
       <CardContent className="gap-5 pt-1">
         <div className="grid gap-5 md:grid-cols-2">
           {fields.map((field) => (
-            <div className={field.key === "scopes" ? "md:col-span-2" : ""} key={field.key}>
+            <div className={field.wide ? "md:col-span-2" : ""} key={field.key}>
               <Label htmlFor={`${provider}-${field.key}`}>{field.label}</Label>
               <Input
                 id={`${provider}-${field.key}`}
-                className="mt-2"
+                className={field.readOnly ? "mt-2 bg-muted font-mono text-xs" : "mt-2"}
                 value={values[field.key] ?? ""}
                 placeholder={field.placeholder}
+                readOnly={field.readOnly}
                 onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}
               />
+              {field.description ? <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{field.description}</p> : null}
             </div>
           ))}
           <div className="md:col-span-2">
-            <Label htmlFor={`${provider}-secret`}>Client Secret</Label>
+            <Label htmlFor={`${provider}-secret`}>{secretLabel}</Label>
             <Input
               id={`${provider}-secret`}
               className="mt-2"
